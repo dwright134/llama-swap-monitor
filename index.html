@@ -1,0 +1,717 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>llama-swap · rig monitor</title>
+<style>
+  :root{
+    --bg:#0b0d10; --panel:#14171c; --panel-2:#191d23; --inner:#0f1216;
+    --border:#242933; --border-2:#2d333d;
+    --text:#e6e9ee; --muted:#7d8794; --muted-2:#586170;
+    --accent:#35d07f;            /* serving / healthy green */
+    --good:#35c46a; --warn:#f2b134; --crit:#e5544b;
+    --g0:#3987e5; --g1:#2bb98a; --g2:#e0a72e;   /* GPU line series (validated set) */
+    --radius:11px;
+    --mono:ui-monospace,"JetBrains Mono","SFMono-Regular",Menlo,Consolas,monospace;
+  }
+  *{box-sizing:border-box}
+  html,body{margin:0;background:var(--bg);color:var(--text);font-family:var(--mono)}
+  html{height:100%}
+  /* fixed viewport height + hidden overflow so ONLY the log region scrolls, not the page */
+  body{padding:18px;font-size:13px;line-height:1.45;height:100vh;overflow:hidden;display:flex;flex-direction:column}
+  a{color:inherit}
+  .lbl{font-size:10.5px;letter-spacing:.14em;text-transform:uppercase;color:var(--muted);font-weight:500}
+  .mono-num{font-variant-numeric:tabular-nums}
+
+  /* header */
+  header{display:flex;align-items:center;gap:14px;margin-bottom:16px;flex-wrap:wrap}
+  header .title{font-size:15px;letter-spacing:.03em;font-weight:600}
+  header .title b{color:var(--accent);font-weight:600}
+  .spacer{flex:1}
+  .pill{display:inline-flex;align-items:center;gap:7px;background:var(--panel);border:1px solid var(--border);
+        border-radius:999px;padding:5px 12px;font-size:11px;color:var(--muted)}
+  .pill .dot{width:8px;height:8px;border-radius:50%;background:var(--muted-2)}
+  .pill.live .dot{background:var(--accent);box-shadow:0 0 0 0 rgba(53,208,127,.5);animation:pulse 2s infinite}
+  .pill.down .dot{background:var(--crit)}
+  @keyframes pulse{0%{box-shadow:0 0 0 0 rgba(53,208,127,.45)}70%{box-shadow:0 0 0 7px rgba(53,208,127,0)}100%{box-shadow:0 0 0 0 rgba(53,208,127,0)}}
+  .pill b{color:var(--text);font-weight:600}
+  /* generating: muted + static when idle, accent + pulsing when busy (fixed width) */
+  .pill.gen{color:var(--muted-2)}
+  .pill.gen .gdot{width:7px;height:7px;border-radius:50%;background:var(--muted-2);flex:none;transition:background .3s}
+  .pill.gen.busy{color:var(--accent);border-color:rgba(53,208,127,.35);background:rgba(53,208,127,.08)}
+  .pill.gen.busy .gdot{background:var(--accent);animation:pulse 1.1s infinite}
+
+  /* grid helpers */
+  .grid{display:grid;gap:12px}
+  .tiles{grid-template-columns:repeat(5,1fr);margin-bottom:12px}
+  .cards{grid-template-columns:repeat(4,1fr);margin-bottom:12px}
+  .charts{grid-template-columns:1fr 1fr;margin-bottom:12px}
+  @media(max-width:1100px){.tiles{grid-template-columns:repeat(3,1fr)}.cards{grid-template-columns:repeat(2,1fr)}.charts{grid-template-columns:1fr}}
+  @media(max-width:640px){.tiles{grid-template-columns:1fr 1fr}.cards{grid-template-columns:1fr}}
+
+  .panel{background:var(--panel);border:1px solid var(--border);border-radius:var(--radius);padding:14px 16px}
+
+  /* context window bar */
+  .ctxpanel{margin-bottom:12px}
+  .ctxrow{display:flex;justify-content:space-between;align-items:baseline;gap:12px;margin-bottom:9px}
+  .ctxmodel{color:var(--muted-2);text-transform:none;letter-spacing:0;font-size:10.5px;margin-left:6px}
+  .ctxnums{font-size:12px;color:var(--muted);font-variant-numeric:tabular-nums;white-space:nowrap}
+  .ctxnums b{color:var(--text);font-weight:600}
+  .ctxnums .sep2{color:var(--muted-2);margin:0 8px}
+  .ctxtrack{height:9px}
+
+  /* stat tiles */
+  .tile .lbl{margin-bottom:9px}
+  .tile .val{font-size:26px;font-weight:650;letter-spacing:-.01em;line-height:1.05}
+  .tile .val small{font-size:14px;color:var(--muted);font-weight:500;margin-left:2px}
+  .tile .val.accent{color:var(--accent)}
+  .tile .sub{margin-top:7px;font-size:11px;color:var(--muted)}
+  .tile .sub .sep{color:var(--muted-2);margin:0 6px}
+  .badge{display:inline-block;padding:2px 8px;border-radius:6px;font-size:10px;letter-spacing:.08em;
+         text-transform:uppercase;font-weight:600;border:1px solid transparent}
+  .badge.serving{color:var(--accent);border-color:rgba(53,208,127,.35);background:rgba(53,208,127,.08)}
+  .badge.loading{color:var(--warn);border-color:rgba(242,177,52,.35);background:rgba(242,177,52,.08)}
+  .badge.stopped{color:var(--muted);border-color:var(--border-2);background:var(--inner)}
+
+  /* device cards */
+  .card .chead{display:flex;align-items:center;justify-content:space-between;margin-bottom:12px}
+  .card .cname{font-size:12px;font-weight:600}
+  .card .cname span{color:var(--muted);font-weight:400}
+  .card .csub{font-size:10.5px;color:var(--muted-2);margin-top:2px}
+  .meter{margin:10px 0}
+  .meter .top{display:flex;justify-content:space-between;align-items:baseline;margin-bottom:5px}
+  .meter .top .v{font-size:12px;font-weight:600;font-variant-numeric:tabular-nums}
+  .track{height:7px;border-radius:4px;background:var(--inner);overflow:hidden;border:1px solid rgba(255,255,255,.03)}
+  .fill{height:100%;border-radius:4px;transition:width .5s ease,background .4s ease;min-width:2px}
+  .statline{display:flex;gap:0;margin-top:12px;padding-top:11px;border-top:1px solid var(--border)}
+  .statline .s{flex:1}
+  .statline .s .k{font-size:9.5px;letter-spacing:.1em;text-transform:uppercase;color:var(--muted-2)}
+  .statline .s .n{font-size:12px;font-weight:600;margin-top:3px;font-variant-numeric:tabular-nums}
+
+  /* charts */
+  .chart-head{display:flex;align-items:center;justify-content:space-between;margin-bottom:8px}
+  .chart-head .r{font-size:10.5px;color:var(--muted)}
+  .legend{display:flex;gap:14px;flex-wrap:wrap}
+  .legend .li{display:inline-flex;align-items:center;gap:6px;font-size:10.5px;color:var(--muted)}
+  .legend .sw{width:10px;height:2.5px;border-radius:2px}
+  .cwrap{position:relative;width:100%;height:150px}
+  canvas{display:block;width:100%;height:100%}
+  .tip{position:absolute;pointer-events:none;background:#0a0c0f;border:1px solid var(--border-2);border-radius:7px;
+       padding:7px 9px;font-size:10.5px;color:var(--text);opacity:0;transition:opacity .1s;white-space:nowrap;z-index:5;
+       box-shadow:0 6px 20px rgba(0,0,0,.5)}
+  .tip .row{display:flex;align-items:center;gap:6px;margin-top:2px}
+  .tip .row:first-child{margin-top:0;color:var(--muted)}
+  .tip .sw{width:8px;height:8px;border-radius:2px}
+
+  /* log viewer */
+  .logpanel{padding:0;overflow:hidden;flex:1 1 auto;display:flex;flex-direction:column;min-height:140px}
+  .logbar{display:flex;align-items:center;gap:8px;padding:11px 14px;border-bottom:1px solid var(--border);flex-wrap:wrap}
+  .logbar .lbl{margin-right:2px}
+  .tabs{display:inline-flex;background:var(--inner);border:1px solid var(--border);border-radius:8px;padding:2px}
+  .tab{padding:4px 11px;border-radius:6px;font-size:11px;color:var(--muted);cursor:pointer;border:none;background:none;font-family:inherit}
+  .tab.active{background:var(--panel-2);color:var(--text)}
+  .btn{padding:4px 11px;border-radius:6px;font-size:11px;color:var(--muted);cursor:pointer;
+       border:1px solid var(--border);background:var(--inner);font-family:inherit}
+  .btn:hover{color:var(--text);border-color:var(--border-2)}
+  .btn.on{color:var(--accent);border-color:rgba(53,208,127,.4);background:rgba(53,208,127,.08)}
+  .logscroll{flex:1 1 auto;min-height:0;overflow-y:auto;padding:10px 14px;font-size:11.5px;line-height:1.5;position:relative}
+  .logscroll::-webkit-scrollbar{width:10px}
+  .logscroll::-webkit-scrollbar-thumb{background:#2a3038;border-radius:5px;border:2px solid var(--panel)}
+  .logline{white-space:pre-wrap;word-break:break-word;color:#b7c0cc}
+  .logline .t{color:var(--muted-2);margin-right:8px}
+  .logline.info .lv{color:var(--g0)}
+  .logline.warn{color:#f0c674}.logline.warn .lv{color:var(--warn)}
+  .logline.error{color:#ef9a9a}.logline.error .lv{color:var(--crit)}
+  .logline .lv{font-weight:600;margin-right:6px}
+  .logline .src{color:var(--muted-2);font-size:9.5px;padding:0 5px;border:1px solid var(--border);border-radius:4px;margin-right:7px}
+  .resume{position:sticky;bottom:6px;float:right;background:var(--accent);color:#06210f;font-weight:600;
+          border:none;border-radius:999px;padding:5px 13px;font-size:11px;cursor:pointer;display:none;font-family:inherit;
+          box-shadow:0 4px 14px rgba(0,0,0,.4)}
+  .resume.show{display:inline-block}
+  .empty{color:var(--muted-2);font-style:italic}
+</style>
+</head>
+<body data-palette="#3987e5,#2bb98a,#e0a72e" data-mode="dark" data-surface="#14171c">
+
+<header>
+  <div class="title">llama&#8203;-swap <b>rig monitor</b></div>
+  <div class="spacer"></div>
+  <div class="pill gen" id="gen"><span class="gdot"></span>generating</div>
+  <div class="pill" id="inflight"><span class="dot"></span><span id="inflightN">0</span>&nbsp;in&#8203;flight</div>
+  <div class="pill" id="conn"><span class="dot"></span><span id="connT">connecting…</span></div>
+</header>
+
+<!-- stat tiles -->
+<div class="grid tiles">
+  <div class="panel tile">
+    <div class="lbl">Model serving</div>
+    <div class="val" id="tModel" style="font-size:17px;line-height:1.2">—</div>
+    <div class="sub"><span id="tModelBadge" class="badge stopped">idle</span><span class="sep">·</span><span id="tCtx">— ctx</span></div>
+  </div>
+  <div class="panel tile">
+    <div class="lbl">Prompt throughput</div>
+    <div class="val accent mono-num" id="tPrompt">—<small>tok/s</small></div>
+    <div class="sub" id="tPromptSub">last request</div>
+  </div>
+  <div class="panel tile">
+    <div class="lbl">Decode throughput</div>
+    <div class="val accent mono-num" id="tDecode">—<small>tok/s</small></div>
+    <div class="sub" id="tDecodeSub">last request</div>
+  </div>
+  <div class="panel tile">
+    <div class="lbl">Session tokens</div>
+    <div class="val mono-num" id="tTokens">—</div>
+    <div class="sub"><span id="tTokIn">0 in</span><span class="sep">·</span><span id="tTokOut">0 out</span></div>
+  </div>
+  <div class="panel tile">
+    <div class="lbl">Total GPU power</div>
+    <div class="val mono-num" id="tPower">—<small>W</small></div>
+    <div class="sub" id="tPowerSub">3 GPUs</div>
+  </div>
+</div>
+
+<!-- context window usage -->
+<div class="panel ctxpanel">
+  <div class="ctxrow">
+    <span class="lbl">Context window <span id="ctxModel" class="ctxmodel"></span></span>
+    <span class="ctxnums"><span id="ctxUsed">—</span> / <span id="ctxMax">—</span> used<span class="sep2">·</span><b id="ctxFree">—</b> free</span>
+  </div>
+  <div class="track ctxtrack"><div class="fill" id="ctxFill" style="width:0%"></div></div>
+</div>
+
+<!-- device cards -->
+<div class="grid cards" id="cards"></div>
+
+<!-- charts -->
+<div class="grid charts">
+  <div class="panel">
+    <div class="chart-head">
+      <div class="lbl">GPU utilization</div>
+      <div class="legend" id="gpuLegend"></div>
+    </div>
+    <div class="cwrap"><canvas id="cUtil"></canvas><div class="tip" id="tipUtil"></div></div>
+  </div>
+  <div class="panel">
+    <div class="chart-head">
+      <div class="lbl">Decode throughput</div>
+      <div class="r" id="decMax">max —</div>
+    </div>
+    <div class="cwrap"><canvas id="cDec"></canvas><div class="tip" id="tipDec"></div></div>
+  </div>
+</div>
+
+<!-- log viewer -->
+<div class="panel logpanel">
+  <div class="logbar">
+    <span class="lbl">Logs</span>
+    <div class="tabs" id="logTabs">
+      <button class="tab active" data-src="all">all</button>
+      <button class="tab" data-src="upstream">upstream</button>
+      <button class="tab" data-src="proxy">proxy</button>
+    </div>
+    <div class="spacer" style="flex:1"></div>
+    <span class="lbl" id="logCount" style="color:var(--muted-2)">0 lines</span>
+    <button class="btn" id="btnFollow">● follow</button>
+    <button class="btn" id="btnWrap">wrap: on</button>
+    <button class="btn" id="btnClear">clear</button>
+  </div>
+  <div class="logscroll" id="logscroll">
+    <div class="empty" id="logEmpty">waiting for log stream…</div>
+    <button class="resume" id="resume">↓ resume autoscroll</button>
+  </div>
+</div>
+
+<script>
+"use strict";
+/* ---------- config ---------- */
+const PERF_MS = 5000;          // matches server sample interval
+const HIST = 120;              // ~10 min of 5s samples
+const DEC_HIST = 80;           // decode tps points retained
+const LOG_CAP = 2000;          // max retained log lines
+const POWER_MAX = 151;         // GTX1070 TDP (W) — bar scale
+const GPU_COLORS = ["--g0","--g1","--g2"].map(v=>getComputedStyle(document.documentElement).getPropertyValue(v).trim());
+
+/* ---------- state ---------- */
+const TPS_SANE = 5000;     // llama-swap emits 1e6 t/s sentinel for 1-token replies
+
+const S = {
+  seeded: false,          // util history backfilled from perf buffer
+  models: [],
+  running: null,          // {id,state}
+  ctxById: {},            // id -> context_length
+  lastMetric: null,       // most recent request record
+  lastGoodMetric: null,   // last request with real tokens (idle token display)
+  lastPromptRate: 0,      // last real prompt t/s (shown while busy)
+  lastDecodeRate: 0,      // last real decode t/s (fallback while busy)
+  inflight: 0,            // active requests (idle when 0)
+  slot: null,             // live {proc,prompt,decoded,nctx} from llama-server /slots
+  slotRate: 0,            // live decode t/s from n_decoded deltas
+  _slotPrev: null,        // {decoded,t} for the live-rate calc
+  slotTimer: null,
+  gpus: {},               // id -> latest gpu sample
+  gpuOrder: [],
+  sys: null,
+  utilHist: {},           // id -> [util,...]
+  utilT: [],              // timestamps (ms) aligned to utilHist
+  decHist: [],            // [{t, tps}]
+  logs: [],               // {src, lvl, ts, text}
+  logSrc: "all",
+  wrap: true,
+  autoscroll: true,
+};
+
+/* ---------- helpers ---------- */
+const $ = id => document.getElementById(id);
+const cssv = n => getComputedStyle(document.documentElement).getPropertyValue(n).trim();
+const clamp = (x,a,b)=>Math.max(a,Math.min(b,x));
+const fmt = n => n==null?"—":n.toLocaleString("en-US");
+const fmt1 = n => n==null?"—":(Math.round(n*10)/10).toLocaleString("en-US",{minimumFractionDigits:1,maximumFractionDigits:1});
+function shortTokens(n){ if(n==null)return "—"; if(n<1000)return ""+n; if(n<1e6)return (n/1e3).toFixed(n<1e4?1:0)+"k"; return (n/1e6).toFixed(2)+"M"; }
+function kTok(n){ if(n==null)return "—"; return n>=1024 ? (n/1024).toFixed(n>=10240?0:1)+"K" : Math.round(n)+""; }  // context-window scale (÷1024)
+function loadColor(pct,warn,crit){ return pct>=crit?cssv("--crit"):pct>=warn?cssv("--warn"):cssv("--good"); }
+
+/* ---------- stat tiles ---------- */
+function renderTiles(){
+  const r = S.running;
+  $("tModel").textContent = r ? (r.name||r.id) : "—";
+  $("tModel").title = r ? (r.name||r.id) : "";
+  const badge = $("tModelBadge");
+  if(!r){ badge.className="badge stopped"; badge.textContent="idle"; }
+  else if(r.state==="ready"||r.state==="running"){ badge.className="badge serving"; badge.textContent="serving"; }
+  else { badge.className="badge loading"; badge.textContent=r.state||"loading"; }
+  const ctx = r ? S.ctxById[r.id] : null;
+  $("tCtx").textContent = ctx ? (ctx>=1024?(ctx/1024).toFixed(0)+"K ctx":ctx+" ctx") : "— ctx";
+
+  const busy = S.inflight>0;
+  // /_slots reads the loaded model directly, so it's always current (or null during a swap/load)
+  const slot = (busy && S.slot) ? S.slot : null;
+  const gm = S.lastGoodMetric;                     // last request with real tokens (idle fallback)
+
+  // token counts: live while generating (climbs during thinking), else last real request
+  const it = slot ? slot.input : (gm && gm.tokens ? (gm.tokens.input_tokens||0) : null);
+  const ot = slot ? slot.decoded : (gm && gm.tokens ? (gm.tokens.output_tokens||0) : null);
+
+  // throughput: live decode rate from /slots while generating; 0 when idle
+  const pp = busy ? (S.lastPromptRate||0) : 0;
+  const tp = slot ? (S.slotRate||0) : (busy ? (S.lastDecodeRate||0) : 0);
+  const fmtRate = v => v>0 ? fmt1(v) : "0";
+  $("tPrompt").innerHTML = fmtRate(pp)+'<small>tok/s</small>';
+  $("tDecode").innerHTML = fmtRate(tp)+'<small>tok/s</small>';
+  $("gen").classList.toggle("busy", busy);
+  $("tPromptSub").textContent = it!=null ? shortTokens(it)+" input tokens" : "last request";
+  $("tDecodeSub").textContent = ot!=null ? shortTokens(ot)+" output tokens" : "last request";
+
+  // session tokens = input+output — live while generating, resets when the client clears chat
+  $("tTokens").textContent = (it==null&&ot==null) ? "—" : shortTokens((it||0)+(ot||0));
+  $("tTokIn").textContent = shortTokens(it||0)+" in";
+  $("tTokOut").textContent = shortTokens(ot||0)+" out";
+
+  let pw=0,n=0; for(const id of S.gpuOrder){ const g=S.gpus[id]; if(g){pw+=g.power_draw_w||0;n++;} }
+  $("tPower").innerHTML = n?Math.round(pw)+'<small>W</small>':'—<small>W</small>';
+  $("tPowerSub").textContent = n+" GPU"+(n===1?"":"s")+" · "+Math.round(n*POWER_MAX)+"W cap";
+
+  // context window: prompt+output ≈ current KV occupancy vs the model's ctx-size (live n_ctx when generating)
+  const maxTok = slot&&slot.nctx ? slot.nctx : (S.running ? S.ctxById[S.running.id] : null);
+  const usedTok = (it!=null||ot!=null) ? ((it||0)+(ot||0)) : null;
+  if(maxTok && usedTok!=null){
+    const usedPct = clamp(usedTok/maxTok*100,0,100), freePct = Math.max(0,100-usedPct);
+    $("ctxUsed").textContent = kTok(usedTok);
+    $("ctxMax").textContent = kTok(maxTok);
+    $("ctxFree").textContent = (freePct<10?freePct.toFixed(1):Math.round(freePct))+"%";
+    $("ctxFill").style.width = usedPct.toFixed(1)+"%";
+    $("ctxFill").style.background = usedPct>=80?cssv("--crit"):usedPct>=60?cssv("--warn"):cssv("--good");
+    $("ctxModel").textContent = S.running ? (S.running.name||S.running.id) : "";
+  }else{
+    $("ctxUsed").textContent="—"; $("ctxMax").textContent = maxTok?kTok(maxTok):"—";
+    $("ctxFree").textContent="—"; $("ctxFill").style.width="0%"; $("ctxModel").textContent="";
+  }
+}
+
+/* ---------- device cards ---------- */
+function meter(label, valText, pct, color){
+  return `<div class="meter"><div class="top"><span class="lbl">${label}</span><span class="v">${valText}</span></div>
+    <div class="track"><div class="fill" style="width:${clamp(pct,0,100)}%;background:${color}"></div></div></div>`;
+}
+function renderCards(){
+  const wrap = $("cards"); const parts=[];
+  for(const id of S.gpuOrder){
+    const g = S.gpus[id]; if(!g) continue;
+    const util = g.gpu_util_pct||0;
+    const vramPct = g.mem_total_mb? (g.mem_used_mb/g.mem_total_mb*100):0;
+    const powPct = g.power_draw_w/POWER_MAX*100;
+    const serving = util>0 ? '<span class="badge serving">active</span>' : '<span class="badge stopped">idle</span>';
+    const tC = g.temp_c||0;
+    const tColor = tC>=75?cssv("--crit"):tC>=60?cssv("--warn"):"var(--text)";
+    parts.push(`<div class="panel card">
+      <div class="chead"><div><div class="cname">GPU ${g.id} <span>· ${(g.name||"").replace("NVIDIA GeForce ","")}</span></div>
+        <div class="csub">${(g.mem_total_mb/1024).toFixed(0)} GB · gpu${g.id}</div></div>${serving}</div>
+      ${meter("GPU util", util.toFixed(0)+"%", util, loadColor(util,60,80))}
+      ${meter("VRAM", (g.mem_used_mb/1024).toFixed(1)+" / "+(g.mem_total_mb/1024).toFixed(0)+" GB", vramPct, loadColor(vramPct,60,80))}
+      ${meter("Power", Math.round(g.power_draw_w)+" / "+POWER_MAX+" W", powPct, loadColor(powPct,60,80))}
+      <div class="statline">
+        <div class="s"><div class="k">Temp</div><div class="n" style="color:${tColor}">${tC}°C</div></div>
+        <div class="s"><div class="k">Fan</div><div class="n">${(g.fan_speed_pct||0).toFixed(0)}%</div></div>
+        <div class="s"><div class="k">Mem&nbsp;util</div><div class="n">${(g.mem_util_pct||0).toFixed(0)}%</div></div>
+      </div></div>`);
+  }
+  // system card
+  if(S.sys){
+    const s=S.sys;
+    const cores=s.cpu_util_per_core||[];
+    const cpuAvg=cores.length? cores.reduce((a,b)=>a+b,0)/cores.length:0;
+    const ramPct=s.mem_total_mb? s.mem_used_mb/s.mem_total_mb*100:0;
+    parts.push(`<div class="panel card">
+      <div class="chead"><div><div class="cname">System <span>· i7-6700</span></div>
+        <div class="csub">${cores.length} threads · ${(s.mem_total_mb/1024).toFixed(0)} GB RAM</div></div>
+        <span class="badge ${cpuAvg>5?'serving':'stopped'}">${cpuAvg>5?'busy':'idle'}</span></div>
+      ${meter("CPU", cpuAvg.toFixed(0)+"%", cpuAvg, loadColor(cpuAvg,70,90))}
+      ${meter("RAM", (s.mem_used_mb/1024).toFixed(1)+" / "+(s.mem_total_mb/1024).toFixed(0)+" GB", ramPct, loadColor(ramPct,80,92))}
+      <div class="statline" style="margin-top:12px">
+        ${cores.slice(0,8).map((c,i)=>`<div class="s"><div class="k">c${i}</div><div class="n">${c.toFixed(0)}</div></div>`).join("")}
+      </div></div>`);
+  }
+  wrap.innerHTML = parts.join("") || '<div class="panel"><span class="empty">no device data yet…</span></div>';
+}
+
+/* ---------- canvas charts ---------- */
+function setupCanvas(cv){
+  const dpr=window.devicePixelRatio||1;
+  const r=cv.getBoundingClientRect();
+  cv.width=Math.max(1,r.width*dpr); cv.height=Math.max(1,r.height*dpr);
+  const ctx=cv.getContext("2d"); ctx.setTransform(dpr,0,0,dpr,0,0);
+  return {ctx,w:r.width,h:r.height};
+}
+const PAD={l:34,r:10,t:10,b:18};
+function axes(ctx,w,h,ymax,yticks){
+  ctx.strokeStyle=cssv("--border"); ctx.fillStyle=cssv("--muted-2");
+  ctx.lineWidth=1; ctx.font="9px "+cssv("--mono"); ctx.textBaseline="middle";
+  for(let i=0;i<=yticks;i++){
+    const val=ymax*i/yticks, y=PAD.t+(h-PAD.t-PAD.b)*(1-i/yticks);
+    ctx.globalAlpha=.5; ctx.beginPath(); ctx.moveTo(PAD.l,y); ctx.lineTo(w-PAD.r,y); ctx.stroke(); ctx.globalAlpha=1;
+    ctx.textAlign="right"; ctx.fillText(Math.round(val), PAD.l-6, y);
+  }
+}
+function drawUtil(){
+  const cv=$("cUtil"); const {ctx,w,h}=setupCanvas(cv);
+  ctx.clearRect(0,0,w,h);
+  const ids=S.gpuOrder; const N=S.utilT.length;
+  axes(ctx,w,h,100,4);
+  if(N<2){ ctx.fillStyle=cssv("--muted-2"); ctx.textAlign="center"; ctx.fillText("collecting…",w/2,h/2); return; }
+  const x=i=>PAD.l+(w-PAD.l-PAD.r)*(i/(HIST-1));
+  const y=v=>PAD.t+(h-PAD.t-PAD.b)*(1-clamp(v,0,100)/100);
+  const off=HIST-N;
+  ids.forEach((id,gi)=>{
+    const arr=S.utilHist[id]||[]; if(arr.length<2)return;
+    ctx.strokeStyle=GPU_COLORS[gi%GPU_COLORS.length]; ctx.lineWidth=2; ctx.lineJoin="round";
+    ctx.beginPath();
+    arr.forEach((v,i)=>{const px=x(off+i),py=y(v); i?ctx.lineTo(px,py):ctx.moveTo(px,py);});
+    ctx.stroke();
+    // direct label at last point
+    const last=arr[arr.length-1];
+    ctx.fillStyle=GPU_COLORS[gi%GPU_COLORS.length]; ctx.textAlign="left"; ctx.textBaseline="middle";
+    ctx.font="9px "+cssv("--mono");
+    ctx.fillText(Math.round(last)+"%", Math.min(x(off+arr.length-1)+4,w-PAD.r-2), clamp(y(last),PAD.t+4,h-PAD.b-4));
+  });
+  drawCrosshair(cv,ctx,w,h,off,x,y,"tipUtil",(i)=>ids.map((id,gi)=>({
+    label:"GPU "+id, color:GPU_COLORS[gi%GPU_COLORS.length],
+    val:Math.round((S.utilHist[id]||[])[i-off]??NaN)+"%"})).filter(r=>r.val!=="NaN%"));
+}
+function drawDecode(){
+  const cv=$("cDec"); const {ctx,w,h}=setupCanvas(cv);
+  ctx.clearRect(0,0,w,h);
+  const data=S.decHist; const N=data.length;
+  const ymax=Math.max(10, Math.ceil((Math.max(...data.map(d=>d.tps),0)*1.15)/10)*10);
+  $("decMax").textContent="max "+ (N?fmt1(Math.max(...data.map(d=>d.tps)))+" tok/s":"—");
+  axes(ctx,w,h,ymax,4);
+  if(N<1){ ctx.fillStyle=cssv("--muted-2"); ctx.textAlign="center"; ctx.fillText("no completed requests yet",w/2,h/2); return; }
+  const x=i=>PAD.l+(w-PAD.l-PAD.r)*(N<2?1:(i/(DEC_HIST-1)));
+  const y=v=>PAD.t+(h-PAD.t-PAD.b)*(1-clamp(v,0,ymax)/ymax);
+  const off=DEC_HIST-N;
+  const col=cssv("--accent");
+  // area fill
+  const grad=ctx.createLinearGradient(0,PAD.t,0,h-PAD.b);
+  grad.addColorStop(0,"rgba(53,208,127,.28)"); grad.addColorStop(1,"rgba(53,208,127,0)");
+  ctx.beginPath();
+  data.forEach((d,i)=>{const px=x(off+i),py=y(d.tps); i?ctx.lineTo(px,py):ctx.moveTo(px,py);});
+  const lastX=x(off+N-1);
+  ctx.lineTo(lastX,h-PAD.b); ctx.lineTo(x(off),h-PAD.b); ctx.closePath();
+  ctx.fillStyle=grad; ctx.fill();
+  // line
+  ctx.beginPath();
+  data.forEach((d,i)=>{const px=x(off+i),py=y(d.tps); i?ctx.lineTo(px,py):ctx.moveTo(px,py);});
+  ctx.strokeStyle=col; ctx.lineWidth=2; ctx.lineJoin="round"; ctx.stroke();
+  // last marker
+  ctx.fillStyle=col; ctx.beginPath(); ctx.arc(lastX,y(data[N-1].tps),3,0,7); ctx.fill();
+  drawCrosshair(cv,ctx,w,h,off,x,y,"tipDec",(i)=>{const d=data[i-off]; return d?[{label:"decode",color:col,val:fmt1(d.tps)+" tok/s"}]:[];});
+}
+function drawCrosshair(cv,ctx,w,h,off,x,y,tipId,rowsAt){
+  const tip=$(tipId);
+  if(cv._hi==null){ tip.style.opacity=0; return; }
+  const i=cv._hi;
+  const px=x(i);
+  ctx.strokeStyle=cssv("--border-2"); ctx.lineWidth=1; ctx.setLineDash([3,3]);
+  ctx.beginPath(); ctx.moveTo(px,PAD.t); ctx.lineTo(px,h-PAD.b); ctx.stroke(); ctx.setLineDash([]);
+  const rows=rowsAt(i);
+  if(!rows.length){ tip.style.opacity=0; return; }
+  tip.innerHTML=rows.map(r=>`<div class="row"><span class="sw" style="background:${r.color}"></span>${r.label}&nbsp;<b>${r.val}</b></div>`).join("");
+  tip.style.opacity=1;
+  const tw=tip.offsetWidth, left=clamp(px+10,0,w-tw-4);
+  tip.style.left=left+"px"; tip.style.top="8px";
+}
+function bindHover(cv, drawFn, idxFromX){
+  cv.addEventListener("mousemove",e=>{
+    const r=cv.getBoundingClientRect();
+    cv._hi=idxFromX((e.clientX-r.left), r.width); drawFn();
+  });
+  cv.addEventListener("mouseleave",()=>{ cv._hi=null; drawFn(); });
+}
+function idxUtil(mx,w){ const N=S.utilT.length; if(N<1)return null; const off=HIST-N;
+  const rel=(mx-PAD.l)/(w-PAD.l-PAD.r); const i=Math.round(rel*(HIST-1)); return clamp(i,off,HIST-1); }
+function idxDec(mx,w){ const N=S.decHist.length; if(N<1)return null; const off=DEC_HIST-N;
+  const rel=(mx-PAD.l)/(w-PAD.l-PAD.r); const i=Math.round(rel*(DEC_HIST-1)); return clamp(i,off,DEC_HIST-1); }
+
+function renderLegend(){
+  $("gpuLegend").innerHTML=S.gpuOrder.map((id,i)=>
+    `<span class="li"><span class="sw" style="background:${GPU_COLORS[i%GPU_COLORS.length]}"></span>GPU ${id}</span>`).join("");
+}
+function redrawCharts(){ renderLegend(); drawUtil(); drawDecode(); }
+
+/* ---------- perf polling ---------- */
+async function pollPerf(){
+  try{
+    const res=await fetch("/api/performance",{cache:"no-store"});
+    if(!res.ok) throw new Error(res.status);
+    const d=await res.json();
+    // latest sample per GPU id (buffer is chronological)
+    const latest={};
+    (d.gpu_stats||[]).forEach(g=>{ latest[g.id]=g; });
+    S.gpus=latest;
+    S.gpuOrder=Object.keys(latest).map(Number).sort((a,b)=>a-b);
+    // system: last sys sample
+    const sys=d.sys_stats||[]; S.sys= sys.length? sys[sys.length-1]:null;
+    if(!S.seeded){
+      // backfill util history from the server's ring buffer (instant chart)
+      S.seeded=true;
+      const byTs=new Map();
+      (d.gpu_stats||[]).forEach(g=>{ if(!byTs.has(g.timestamp)) byTs.set(g.timestamp,{}); byTs.get(g.timestamp)[g.id]=g.gpu_util_pct||0; });
+      const times=[...byTs.keys()].slice(-HIST);
+      S.utilT=times.map(t=>Date.parse(t)||0);
+      S.gpuOrder.forEach(id=>{ S.utilHist[id]=times.map(t=>byTs.get(t)[id]??0); });
+    }else{
+      // push a fresh util point
+      const now=Date.now();
+      S.gpuOrder.forEach(id=>{
+        if(!S.utilHist[id]) S.utilHist[id]=[];
+        S.utilHist[id].push(latest[id].gpu_util_pct||0);
+        if(S.utilHist[id].length>HIST) S.utilHist[id].shift();
+      });
+      S.utilT.push(now); if(S.utilT.length>HIST) S.utilT.shift();
+    }
+    renderCards(); renderTiles(); redrawCharts();
+    resyncRunning();   // self-heal model detection even if an SSE modelStatus event was missed
+  }catch(e){ /* transient; leave last values */ }
+}
+
+// authoritative running-model check (fallback for a missed/stale SSE modelStatus during rapid swaps)
+async function resyncRunning(){
+  try{
+    const res=await fetch("/running",{cache:"no-store"}); if(!res.ok) return;
+    const list=(await res.json()).running||[];
+    const run=list.find(m=>m.state!=="stopped"&&m.state!=="stopping")||list[0]||null;
+    const cur=run?{id:run.model,name:run.name,state:run.state}:null;
+    if((cur&&cur.id)!==(S.running&&S.running.id) || (cur&&cur.state)!==(S.running&&S.running.state)){
+      S.running=cur;
+      if(run){ const mm=/--ctx-size\s+(\d+)/.exec(run.cmd||""); if(mm) S.ctxById[cur.id]=parseInt(mm[1],10); }
+      renderTiles();
+    }
+  }catch{}
+}
+
+/* ---------- SSE events ---------- */
+let es=null, backoff=1000;
+function connect(){
+  setConn("connecting");
+  es=new EventSource("/api/events");
+  es.onopen=()=>{ backoff=1000; setConn("live"); };
+  es.onmessage=ev=>{
+    let env; try{ env=JSON.parse(ev.data); }catch{ return; }
+    let payload; try{ payload=JSON.parse(env.data); }catch{ payload=env.data; }
+    switch(env.type){
+      case "modelStatus": onModels(payload); break;
+      case "metrics": onMetrics(payload); break;
+      case "logData": onLog(payload); break;
+      case "inflight": onInflight(payload); break;
+    }
+  };
+  es.onerror=()=>{
+    setConn("down"); es.close();
+    setTimeout(connect, backoff); backoff=Math.min(backoff*1.8,15000);
+  };
+}
+function setConn(state){
+  const p=$("conn"), t=$("connT");
+  p.className="pill "+(state==="live"?"live":state==="down"?"down":"");
+  t.textContent = state==="live"?"live":state==="down"?"reconnecting…":"connecting…";
+}
+function onModels(arr){
+  if(!Array.isArray(arr)) return;
+  S.models=arr;
+  const run=arr.find(m=>m.state && m.state!=="stopped" && m.state!=="stopping");
+  const changed = (run&&run.id) !== (S.running&&S.running.id);
+  S.running=run||null;
+  renderTiles();
+  if(run && (changed || S.ctxById[run.id]==null)) fetchCtx();
+}
+function onMetrics(arr){
+  if(!Array.isArray(arr)) return;
+  arr.forEach(m=>{
+    if(!m||!m.tokens) return;
+    S.lastMetric=m;
+    const t=m.tokens, tps=t.tokens_per_second;
+    if((t.input_tokens||0)>0 || (t.output_tokens||0)>0) S.lastGoodMetric=m;   // skip empty/aborted requests
+    if(tps>0 && tps<=TPS_SANE && (t.output_tokens||0)>0){
+      S.lastDecodeRate=tps;
+      if(t.prompt_per_second>0 && t.prompt_per_second<=TPS_SANE) S.lastPromptRate=t.prompt_per_second;
+      S.decHist.push({t:Date.parse(m.timestamp)||Date.now(), tps});
+      if(S.decHist.length>DEC_HIST) S.decHist.shift();
+    }
+  });
+  renderTiles(); drawDecode();
+}
+function onInflight(o){
+  const n=(o&&o.total)||0;
+  S.inflight=n;
+  $("inflightN").textContent=n;
+  $("inflight").className="pill"+(n>0?" live":"");
+  // poll llama-server /slots ONLY while a request is active (never touches the idle-unload timer)
+  if(n>0 && !S.slotTimer){ pollSlots(); S.slotTimer=setInterval(pollSlots, 700); }
+  else if(n<=0 && S.slotTimer){ clearInterval(S.slotTimer); S.slotTimer=null; S.slot=null; S._slotPrev=null; S.slotRate=0; }
+  renderTiles();
+}
+
+// live token/context counts read DIRECTLY from the loaded llama-server (:8081 via /_slots).
+// This never goes through llama-swap's router, so polling can never trigger a model swap.
+async function pollSlots(){
+  const r=S.running;
+  if(!r || S.inflight<=0){ return; }
+  try{
+    const res=await fetch("/_slots",{cache:"no-store"});
+    // model loading/swapping -> 503; drop stale live data so tiles fall back to last request
+    if(!res.ok){ S.slot=null; S._slotPrev=null; S.slotRate=0; renderTiles(); return; }
+    const arr=await res.json();
+    const s=Array.isArray(arr)?arr[0]:null;
+    if(!s){ S.slot=null; S._slotPrev=null; S.slotRate=0; renderTiles(); return; }
+    const nt=(s.next_token&&s.next_token[0])||{};
+    const decoded=nt.n_decoded||0, now=Date.now();
+    if(s.is_processing && S._slotPrev && decoded>S._slotPrev.decoded){   // live decode rate from deltas
+      const dt=(now-S._slotPrev.t)/1000;
+      if(dt>0) S.slotRate=(decoded-S._slotPrev.decoded)/dt;
+    }else if(decoded<(S._slotPrev?S._slotPrev.decoded:0)){
+      S.slotRate=0;                             // new request started (n_decoded reset) — clear stale rate
+    }
+    S._slotPrev={decoded,t:now};
+    // n_prompt_tokens is the full sequence length (prompt+generated); derive the prompt alone
+    const npt=s.n_prompt_tokens||0;
+    S.slot={proc:!!s.is_processing, input:Math.max(0,npt-decoded), decoded, nctx:s.n_ctx||0};
+    renderTiles();
+  }catch{ /* transient */ }
+}
+
+/* ---------- logs ---------- */
+const LVL=/\[(INFO|WARN|ERROR|DEBUG)\]/;
+function classify(line){
+  const m=line.match(LVL);
+  if(m) return m[1].toLowerCase()==="error"?"error":m[1].toLowerCase()==="warn"?"warn":"info";
+  if(/error|failed|panic|fatal/i.test(line)) return "error";
+  if(/warn/i.test(line)) return "warn";
+  return "info";
+}
+function onLog(o){
+  if(!o||o.data==null) return;
+  const src=o.source||"proxy";
+  const lines=String(o.data).split("\n").filter(l=>l.length);
+  for(const raw of lines){
+    S.logs.push({src, lvl:classify(raw), text:raw});
+  }
+  if(S.logs.length>LOG_CAP) S.logs.splice(0,S.logs.length-LOG_CAP);
+  renderLogs();
+}
+function logMatches(l){ return S.logSrc==="all"||l.src===S.logSrc; }
+function renderLogs(){
+  const box=$("logscroll"); const resume=$("resume");
+  const filtered=S.logs.filter(logMatches);
+  $("logCount").textContent=filtered.length+" line"+(filtered.length===1?"":"s");
+  if(!filtered.length){ box.querySelectorAll(".logline").forEach(n=>n.remove());
+    if(!$("logEmpty")){ const e=document.createElement("div"); e.className="empty"; e.id="logEmpty"; e.textContent="no lines"; box.prepend(e);} return; }
+  const emptyEl=$("logEmpty"); if(emptyEl) emptyEl.remove();
+  // full re-render (bounded by LOG_CAP) — keeps filter logic simple
+  const frag=document.createDocumentFragment();
+  for(const l of filtered){
+    const div=document.createElement("div");
+    div.className="logline "+l.lvl;
+    div.style.whiteSpace=S.wrap?"pre-wrap":"pre";
+    const lvlTxt=(l.text.match(LVL)||[])[1];
+    let body=l.text;
+    const srcTag=`<span class="src">${l.src[0].toUpperCase()}</span>`;
+    if(lvlTxt){ body=l.text.replace(LVL,`<span class="lv">[${lvlTxt}]</span>`); }
+    div.innerHTML=srcTag+body;
+    frag.appendChild(div);
+  }
+  box.querySelectorAll(".logline").forEach(n=>n.remove());
+  box.insertBefore(frag, resume);
+  if(S.autoscroll){ box.scrollTop=box.scrollHeight; resume.classList.remove("show"); }
+  else resume.classList.add("show");
+}
+
+/* ---------- context length (parsed from the running model's launch cmd) ---------- */
+async function fetchCtx(){
+  try{
+    const r=await fetch("/running",{cache:"no-store"}); if(!r.ok)return;
+    const d=await r.json();
+    (d.running||[]).forEach(m=>{
+      const mm=/--ctx-size\s+(\d+)/.exec(m.cmd||"");
+      if(mm) S.ctxById[m.model]=parseInt(mm[1],10);
+    });
+    renderTiles();
+  }catch{}
+}
+
+/* ---------- UI wiring ---------- */
+$("logTabs").addEventListener("click",e=>{
+  const b=e.target.closest(".tab"); if(!b)return;
+  $("logTabs").querySelectorAll(".tab").forEach(t=>t.classList.remove("active"));
+  b.classList.add("active"); S.logSrc=b.dataset.src; renderLogs(); setFollow(true);
+});
+$("btnClear").onclick=()=>{ S.logs=[]; renderLogs(); };
+$("btnWrap").onclick=()=>{ S.wrap=!S.wrap; $("btnWrap").textContent="wrap: "+(S.wrap?"on":"off"); renderLogs(); };
+function setFollow(on){
+  S.autoscroll=on;
+  $("btnFollow").classList.toggle("on", on);
+  const b=$("logscroll");
+  if(on){ b.scrollTop=b.scrollHeight; $("resume").classList.remove("show"); }
+  else $("resume").classList.toggle("show", S.logs.some(logMatches));
+}
+$("btnFollow").onclick=()=>setFollow(!S.autoscroll);
+$("resume").onclick=()=>setFollow(true);
+$("logscroll").addEventListener("scroll",()=>{
+  const b=$("logscroll");
+  const atBottom=b.scrollHeight-b.scrollTop-b.clientHeight<24;
+  if(atBottom!==S.autoscroll) setFollow(atBottom);
+});
+
+bindHover($("cUtil"), drawUtil, idxUtil);
+bindHover($("cDec"), drawDecode, idxDec);
+window.addEventListener("resize",()=>{ clearTimeout(window._rz); window._rz=setTimeout(redrawCharts,150); });
+
+/* ---------- boot ---------- */
+$("btnFollow").classList.add("on");   // follow (autoscroll) on by default
+renderCards(); renderTiles(); redrawCharts();
+connect();
+pollPerf(); setInterval(pollPerf, PERF_MS);
+
+/* screenshot helper: ?shot closes the endless SSE so headless virtual-time can settle */
+if(location.search.includes("shot")) setTimeout(()=>{ try{es&&es.close();}catch{} }, 4000);
+</script>
+</body>
+</html>

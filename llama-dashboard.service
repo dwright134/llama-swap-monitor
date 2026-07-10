@@ -1,0 +1,19 @@
+[Unit]
+Description=llama-swap rig monitor dashboard
+Documentation=file:///home/dwright/dashboard/index.html
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/python3 /home/dwright/dashboard/serve.py --port 8090
+Restart=on-failure
+RestartSec=3
+# serve.py only proxies to 127.0.0.1:8080; no secrets, but keep it modest
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadOnlyPaths=/home/dwright/dashboard
+
+[Install]
+WantedBy=default.target

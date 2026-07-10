@@ -12,8 +12,22 @@
     --accent:#35d07f;            /* serving / healthy green */
     --good:#35c46a; --warn:#f2b134; --crit:#e5544b;
     --g0:#3987e5; --g1:#2bb98a; --g2:#e0a72e;   /* GPU line series (validated set) */
+    /* theme-specific surfaces (overridden in light mode) */
+    --tip-bg:#0a0c0f; --scroll:#2a3038; --track-border:rgba(255,255,255,.03);
+    --log-text:#b7c0cc; --log-warn:#f0c674; --log-error:#ef9a9a;
     --radius:11px;
     --mono:ui-monospace,"JetBrains Mono","SFMono-Regular",Menlo,Consolas,monospace;
+  }
+  /* muted light mode — soft slate, off-white panels (deliberately NOT pure white) */
+  :root[data-theme="light"]{
+    --bg:#e5e7ec; --panel:#f2f3f6; --panel-2:#eaecf0; --inner:#dcdfe5;
+    --border:#d0d4db; --border-2:#bfc4ce;
+    --text:#1b2129; --muted:#5a6472; --muted-2:#8b95a3;
+    --accent:#12a05f;            /* darkened green for contrast on light */
+    --good:#199e57; --warn:#b3810a; --crit:#d23a30;
+    --g0:#2f6fd0; --g1:#158a66; --g2:#b3821a;
+    --tip-bg:#f8f9fb; --scroll:#c3c8d1; --track-border:rgba(0,0,0,.05);
+    --log-text:#38414d; --log-warn:#8a6200; --log-error:#c0392b;
   }
   *{box-sizing:border-box}
   html,body{margin:0;background:var(--bg);color:var(--text);font-family:var(--mono)}
@@ -36,6 +50,11 @@
   .pill.down .dot{background:var(--crit)}
   @keyframes pulse{0%{box-shadow:0 0 0 0 rgba(53,208,127,.45)}70%{box-shadow:0 0 0 7px rgba(53,208,127,0)}100%{box-shadow:0 0 0 0 rgba(53,208,127,0)}}
   .pill b{color:var(--text);font-weight:600}
+  /* theme switcher */
+  .themebtn{cursor:pointer;font-family:inherit;padding:5px 11px;line-height:1;color:var(--muted);
+            transition:color .2s,border-color .2s,background .2s}
+  .themebtn:hover{color:var(--text);border-color:var(--border-2)}
+  .themebtn .ico{font-size:13px}
   /* generating: muted + static when idle, accent + pulsing when busy (fixed width) */
   .pill.gen{color:var(--muted-2)}
   .pill.gen .gdot{width:7px;height:7px;border-radius:50%;background:var(--muted-2);flex:none;transition:background .3s}
@@ -82,7 +101,7 @@
   .meter{margin:10px 0}
   .meter .top{display:flex;justify-content:space-between;align-items:baseline;margin-bottom:5px}
   .meter .top .v{font-size:12px;font-weight:600;font-variant-numeric:tabular-nums}
-  .track{height:7px;border-radius:4px;background:var(--inner);overflow:hidden;border:1px solid rgba(255,255,255,.03)}
+  .track{height:7px;border-radius:4px;background:var(--inner);overflow:hidden;border:1px solid var(--track-border)}
   .fill{height:100%;border-radius:4px;transition:width .5s ease,background .4s ease;min-width:2px}
   .statline{display:flex;gap:0;margin-top:12px;padding-top:11px;border-top:1px solid var(--border)}
   .statline .s{flex:1}
@@ -97,7 +116,7 @@
   .legend .sw{width:10px;height:2.5px;border-radius:2px}
   .cwrap{position:relative;width:100%;height:150px}
   canvas{display:block;width:100%;height:100%}
-  .tip{position:absolute;pointer-events:none;background:#0a0c0f;border:1px solid var(--border-2);border-radius:7px;
+  .tip{position:absolute;pointer-events:none;background:var(--tip-bg);border:1px solid var(--border-2);border-radius:7px;
        padding:7px 9px;font-size:10.5px;color:var(--text);opacity:0;transition:opacity .1s;white-space:nowrap;z-index:5;
        box-shadow:0 6px 20px rgba(0,0,0,.5)}
   .tip .row{display:flex;align-items:center;gap:6px;margin-top:2px}
@@ -117,12 +136,12 @@
   .btn.on{color:var(--accent);border-color:rgba(53,208,127,.4);background:rgba(53,208,127,.08)}
   .logscroll{flex:1 1 auto;min-height:0;overflow-y:auto;padding:10px 14px;font-size:11.5px;line-height:1.5;position:relative}
   .logscroll::-webkit-scrollbar{width:10px}
-  .logscroll::-webkit-scrollbar-thumb{background:#2a3038;border-radius:5px;border:2px solid var(--panel)}
-  .logline{white-space:pre-wrap;word-break:break-word;color:#b7c0cc}
+  .logscroll::-webkit-scrollbar-thumb{background:var(--scroll);border-radius:5px;border:2px solid var(--panel)}
+  .logline{white-space:pre-wrap;word-break:break-word;color:var(--log-text)}
   .logline .t{color:var(--muted-2);margin-right:8px}
   .logline.info .lv{color:var(--g0)}
-  .logline.warn{color:#f0c674}.logline.warn .lv{color:var(--warn)}
-  .logline.error{color:#ef9a9a}.logline.error .lv{color:var(--crit)}
+  .logline.warn{color:var(--log-warn)}.logline.warn .lv{color:var(--warn)}
+  .logline.error{color:var(--log-error)}.logline.error .lv{color:var(--crit)}
   .logline .lv{font-weight:600;margin-right:6px}
   .logline .src{color:var(--muted-2);font-size:9.5px;padding:0 5px;border:1px solid var(--border);border-radius:4px;margin-right:7px}
   .resume{position:sticky;bottom:6px;float:right;background:var(--accent);color:#06210f;font-weight:600;
@@ -131,12 +150,17 @@
   .resume.show{display:inline-block}
   .empty{color:var(--muted-2);font-style:italic}
 </style>
+<script>
+  /* apply saved theme before first paint so there's no dark→light flash */
+  try{ var _t=localStorage.getItem("rig-theme"); if(_t==="light") document.documentElement.setAttribute("data-theme","light"); }catch(e){}
+</script>
 </head>
 <body data-palette="#3987e5,#2bb98a,#e0a72e" data-mode="dark" data-surface="#14171c">
 
 <header>
   <div class="title">llama&#8203;-swap <b>rig monitor</b></div>
   <div class="spacer"></div>
+  <button class="pill themebtn" id="themeBtn" title="Toggle light / dark" aria-label="Toggle light / dark mode"><span class="ico" id="themeIco">☾</span></button>
   <div class="pill gen" id="gen"><span class="gdot"></span>generating</div>
   <div class="pill" id="inflight"><span class="dot"></span><span id="inflightN">0</span>&nbsp;in&#8203;flight</div>
   <div class="pill" id="conn"><span class="dot"></span><span id="connT">connecting…</span></div>
@@ -230,7 +254,7 @@ const HIST = 120;              // ~10 min of 5s samples
 const DEC_HIST = 80;           // decode tps points retained
 const LOG_CAP = 2000;          // max retained log lines
 const POWER_MAX = 151;         // GTX1070 TDP (W) — bar scale
-const GPU_COLORS = ["--g0","--g1","--g2"].map(v=>getComputedStyle(document.documentElement).getPropertyValue(v).trim());
+let GPU_COLORS = ["--g0","--g1","--g2"].map(v=>getComputedStyle(document.documentElement).getPropertyValue(v).trim());
 
 /* ---------- state ---------- */
 const TPS_SANE = 5000;     // llama-swap emits 1e6 t/s sentinel for 1-token replies
@@ -677,6 +701,22 @@ async function fetchCtx(){
   }catch{}
 }
 
+/* ---------- theme switcher ---------- */
+function applyTheme(t){
+  const root=document.documentElement;
+  if(t==="light") root.setAttribute("data-theme","light"); else root.removeAttribute("data-theme");
+  document.body.setAttribute("data-mode", t);
+  $("themeIco").textContent = t==="light" ? "☀" : "☾";
+  GPU_COLORS = ["--g0","--g1","--g2"].map(cssv);   // series colors differ per theme
+  redrawCharts();                                   // canvases re-read CSS vars on draw
+}
+function currentTheme(){ return document.documentElement.getAttribute("data-theme")==="light" ? "light" : "dark"; }
+$("themeBtn").onclick=()=>{
+  const next = currentTheme()==="light" ? "dark" : "light";
+  try{ localStorage.setItem("rig-theme", next); }catch{}
+  applyTheme(next);
+};
+
 /* ---------- UI wiring ---------- */
 $("logTabs").addEventListener("click",e=>{
   const b=e.target.closest(".tab"); if(!b)return;
@@ -706,6 +746,7 @@ window.addEventListener("resize",()=>{ clearTimeout(window._rz); window._rz=setT
 
 /* ---------- boot ---------- */
 $("btnFollow").classList.add("on");   // follow (autoscroll) on by default
+applyTheme(currentTheme());           // sync icon + series colors to the pre-paint theme
 renderCards(); renderTiles(); redrawCharts();
 connect();
 pollPerf(); setInterval(pollPerf, PERF_MS);

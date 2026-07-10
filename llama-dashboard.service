@@ -6,6 +6,8 @@ Wants=network-online.target
 
 [Service]
 Type=simple
+# Optional: friendly name shown in the page/tab title (defaults to the hostname)
+#Environment=RIG_NAME=gpubox
 ExecStart=/usr/bin/python3 /home/dwright/dashboard/serve.py --port 8090
 Restart=on-failure
 RestartSec=3

@@ -81,6 +81,7 @@ Check it: `systemctl --user status llama-dashboard` · logs: `journalctl --user 
 Everything is a small edit near the top of the two files:
 
 - **Ports / hosts** — `serve.py`: `--port` / `--host` flags; `UPSTREAM` (llama-swap, `:8080`) and `UPSTREAM_LLAMA` (llama-server, `:8081`) constants.
+- **Rig name in the title** — the page/tab title reads `<name> monitor`, where `<name>` defaults to the machine's **hostname**. Set the `RIG_NAME` environment variable to override it (e.g. `RIG_NAME=gpubox python3 serve.py`, or uncomment the `Environment=` line in the systemd unit).
 - **Bar thresholds** — `index.html`: GPU/system meters use `loadColor(pct, 60, 80)`; the context bar switches at 60% / 80%. Adjust to taste.
 - **Poll intervals / history depth** — `index.html` top of `<script>`: `PERF_MS` (perf poll), `HIST` (util history points), `DEC_HIST`, `LOG_CAP`, and the `/slots` interval in `onInflight`.
 - **Power bar scale** — `POWER_MAX` (per-GPU TDP in watts).

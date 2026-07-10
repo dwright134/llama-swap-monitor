@@ -10,6 +10,7 @@ Pure stdlib. No parsing, no state. Run: python3 serve.py [--port 8090]
 import argparse
 import http.server
 import os
+import socket
 import socketserver
 import sys
 import urllib.request
@@ -22,6 +23,11 @@ UPSTREAM_LLAMA = "http://127.0.0.1:8081"
 # Path prefixes proxied to llama-swap; everything else is served as a local file.
 PROXY_PREFIXES = ("/api/", "/v1/", "/logs", "/running", "/health", "/unload", "/upstream", "/metrics")
 HERE = os.path.dirname(os.path.abspath(__file__))
+# Rig label shown in the page/tab title. Defaults to this machine's hostname;
+# set RIG_NAME to override (e.g. a friendly name). The word "monitor" is kept as
+# the suffix, so index.html's placeholder "rig monitor" becomes "<name> monitor".
+RIG_NAME = os.environ.get("RIG_NAME", "").strip() or socket.gethostname()
+RIG_LABEL = f"{RIG_NAME} monitor"
 
 
 class Handler(http.server.BaseHTTPRequestHandler):
@@ -63,6 +69,9 @@ class Handler(http.server.BaseHTTPRequestHandler):
         except OSError:
             self.send_error(404, "not found")
             return
+        if name.endswith(".html"):
+            # stamp the rig label into the title + header ("rig monitor" placeholder)
+            body = body.replace(b"rig monitor", RIG_LABEL.encode("utf-8"))
         self.send_response(200)
         self.send_header("Content-Type", "text/html; charset=utf-8")
         self.send_header("Content-Length", str(len(body)))

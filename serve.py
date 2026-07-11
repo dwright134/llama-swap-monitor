@@ -9,6 +9,7 @@ Pure stdlib. No parsing, no state. Run: python3 serve.py [--port 8090]
 """
 import argparse
 import http.server
+import json
 import os
 import socket
 import socketserver
@@ -16,10 +17,10 @@ import sys
 import urllib.request
 
 UPSTREAM = "http://127.0.0.1:8080"
-# The loaded model's llama-server. Queried DIRECTLY (not via llama-swap) so that
-# reading /slots can never trigger a model load/swap. All models on this rig reuse
-# this port since only one runs at a time.
-UPSTREAM_LLAMA = "http://127.0.0.1:8081"
+# The loaded model's llama-server is reached DIRECTLY (not via llama-swap) so that
+# reading /slots can never trigger a model load/swap. llama-swap assigns each model
+# a fresh port (${PORT}), so the port is resolved per-request from /running rather
+# than hardcoded (see _current_upstream).
 # Path prefixes proxied to llama-swap; everything else is served as a local file.
 PROXY_PREFIXES = ("/api/", "/v1/", "/logs", "/running", "/health", "/unload", "/upstream", "/metrics")
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -39,11 +40,27 @@ class Handler(http.server.BaseHTTPRequestHandler):
     def _is_proxied(self):
         return any(self.path == p or self.path.startswith(p) for p in PROXY_PREFIXES)
 
+    def _current_upstream(self):
+        """Base URL of the currently-loaded llama-server, or None if none is
+        running. llama-swap assigns each model a fresh ${PORT}, so read the live
+        port from /running rather than hardcoding one. A GET to /running never
+        triggers a swap."""
+        try:
+            with urllib.request.urlopen(UPSTREAM + "/running", timeout=2) as r:
+                running = json.load(r).get("running") or []
+        except Exception:
+            return None
+        return running[0].get("proxy") if running else None
+
     def do_GET(self):
         route = self.path.split("?", 1)[0]
         if route == "/_slots":
             # live token counts, read straight from the loaded llama-server (never swaps a model)
-            self._proxy("GET", target=UPSTREAM_LLAMA + "/slots")
+            base = self._current_upstream()
+            if not base:
+                self.send_error(503, "no model loaded")
+                return
+            self._proxy("GET", target=base + "/slots")
         elif self._is_proxied():
             self._proxy("GET")
         elif route == "/" or route == "/index.html":

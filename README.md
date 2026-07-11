@@ -35,14 +35,14 @@ Because llama-swap does **not** send CORS headers on its responses, a browser ca
 
 ### Why `/slots` is read directly (swap-safety)
 
-Live token counts come from the llama-server `/slots` endpoint. It is **not** read through llama-swap's `/upstream/{model}/…` route, because that route runs the request through llama-swap's model router and will **load/swap to the targeted model if it isn't already running** — a monitor polling it could ping-pong models against your real workload. Instead, `serve.py` exposes `GET /_slots`, which reads the loaded llama-server **directly on `127.0.0.1:8081`**, bypassing the swap logic entirely. During a model load it returns `503` and the UI falls back to the last completed request's numbers. Polling it can never trigger a swap.
+Live token counts come from the llama-server `/slots` endpoint. It is **not** read through llama-swap's `/upstream/{model}/…` route, because that route runs the request through llama-swap's model router and will **load/swap to the targeted model if it isn't already running** — a monitor polling it could ping-pong models against your real workload. Instead, `serve.py` exposes `GET /_slots`, which reads the loaded llama-server **directly on its own port**, bypassing the swap logic entirely. llama-swap assigns each model a fresh port (`${PORT}`, from `startPort`), so `serve.py` resolves the live port from llama-swap's `/running` (a GET that never triggers a swap) rather than hardcoding one. When nothing is loaded it returns `503` and the UI falls back to the last completed request's numbers. Polling it can never trigger a swap.
 
 ## Requirements
 
 - A running **llama-swap** with the `/api/performance` and `/api/events` endpoints (v224 or newer).
 - GPU stats come from llama-swap's performance monitor (nvidia-smi / LACT / rocm-smi) — nothing to install here.
 - **Python 3** (standard library only — no `pip install`).
-- The llama-server upstream on `127.0.0.1:8081` (llama-swap's default). If yours differs, change `UPSTREAM_LLAMA` in `serve.py`.
+- The llama-server upstream, whose port llama-swap assigns per-model via `${PORT}`; `serve.py` discovers it from `/running` (see `_current_upstream`), so no fixed upstream port is assumed.
 
 ## Install
 
@@ -80,7 +80,7 @@ Check it: `systemctl --user status llama-dashboard` · logs: `journalctl --user 
 
 Everything is a small edit near the top of the two files:
 
-- **Ports / hosts** — `serve.py`: `--port` / `--host` flags; `UPSTREAM` (llama-swap, `:8080`) and `UPSTREAM_LLAMA` (llama-server, `:8081`) constants.
+- **Ports / hosts** — `serve.py`: `--port` / `--host` flags; `UPSTREAM` (llama-swap, `:8080`) constant. The llama-server upstream port is resolved dynamically from `/running` (llama-swap's per-model `${PORT}`), not a constant.
 - **Rig name in the title** — the page/tab title reads `<name> monitor`, where `<name>` defaults to the machine's **hostname**. Set the `RIG_NAME` environment variable to override it (e.g. `RIG_NAME=gpubox python3 serve.py`, or uncomment the `Environment=` line in the systemd unit).
 - **Bar thresholds** — `index.html`: GPU/system meters use `loadColor(pct, 60, 80)`; the context bar switches at 60% / 80%. Adjust to taste.
 - **Poll intervals / history depth** — `index.html` top of `<script>`: `PERF_MS` (perf poll), `HIST` (util history points), `DEC_HIST`, `LOG_CAP`, and the `/slots` interval in `onInflight`.

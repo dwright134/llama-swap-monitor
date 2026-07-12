@@ -1,0 +1,14 @@
+# Make Intel RAPL energy counters readable by non-root so the dashboard's
+# power sampler (serve.py PowerMeter) can measure CPU + DRAM power for the
+# whole-system wall estimate. `energy_uj` is root-only (0400) since the 2020
+# side-channel lockdown; this relaxes it to world-readable and persists across
+# reboots. (The sampler also self-heals via passwordless sudo if this isn't
+# installed, and simply omits CPU/DRAM from the estimate if RAPL is unreadable.)
+#
+# Install:
+#   sudo cp 99-rapl-readable.rules /etc/udev/rules.d/
+#   sudo udevadm control --reload-rules
+#   sudo udevadm trigger --subsystem-match=powercap --action=change
+#
+# Intel CPUs only (AMD uses amd_energy/k10temp — adjust or drop this file).
+SUBSYSTEM=="powercap", KERNEL=="intel-rapl:*", ACTION=="add|change", RUN+="/bin/chmod -f 0444 /sys%p/energy_uj"

@@ -199,10 +199,10 @@
     <div class="sub"><span id="tTokIn">0 in</span><span class="sep">·</span><span id="tTokOut">0 out</span></div>
   </div>
   <div class="panel tile">
-    <div class="lbl">Total GPU power</div>
+    <div class="lbl">System power <span style="opacity:.45;font-weight:400">est.</span></div>
     <div class="val mono-num" id="tPower">—<small>W</small></div>
-    <div class="sub" id="tPowerSub">3 GPUs</div>
-    <div class="sub"><span id="tPowerCost" title="Energy cost since last reset — click to set your electricity rate ($/kWh)" style="cursor:pointer">—</span> <span id="tPowerReset" title="Reset the accumulated total" style="cursor:pointer;opacity:.6;font-size:1.25em;vertical-align:-2px">↺</span></div>
+    <div class="sub" id="tPowerSub" title="Estimated wall (AC) draw = (GPU + CPU + DRAM + baseline) ÷ PSU efficiency">wall estimate</div>
+    <div class="sub"><span id="tPowerCost" title="Energy + cost since last reset — always accumulating (server-side). Click to set your electricity rate ($/kWh)" style="cursor:pointer">—</span> <span id="tPowerReset" title="Reset the accumulated total" style="cursor:pointer;opacity:.6;font-size:1.25em;vertical-align:-2px">↺</span></div>
   </div>
 </div>
 
@@ -267,7 +267,7 @@ const HIST = 120;              // ~10 min of 5s samples
 const DEC_HIST = 80;           // decode tps points retained
 const LOG_CAP = 2000;          // max retained log lines
 const POWER_MAX = 151;         // GTX1070 TDP (W) — bar scale
-const POWER_RATE_DEF = 0.15;   // default electricity price ($/kWh) for the session cost meter
+const ENERGY_MS = 5000;        // /_energy poll cadence (server samples every 10s)
 let GPU_COLORS = ["--g0","--g1","--g2"].map(v=>getComputedStyle(document.documentElement).getPropertyValue(v).trim());
 
 /* ---------- state ---------- */
@@ -289,10 +289,7 @@ const S = {
   slotTimer: null,
   gpus: {},               // id -> latest gpu sample
   gpuOrder: [],
-  energyWh: 0,            // GPU energy accumulated (Wh), integrated from power samples; persisted across reloads, reset via the power tile
-  energyTs: null,         // last integration timestamp (ms)
-  prevW: 0,               // previous total watts (trapezoidal integration)
-  powerRate: 0.15,        // electricity price ($/kWh); persisted, editable via the power tile
+  energy: null,           // last /_energy snapshot from the server-side power sampler
   sys: null,
   utilHist: {},           // id -> [util,...]
   utilT: [],              // timestamps (ms) aligned to utilHist
@@ -349,12 +346,8 @@ function renderTiles(){
   $("tTokIn").textContent = shortTokens(it||0)+" in";
   $("tTokOut").textContent = shortTokens(ot||0)+" out";
 
-  let pw=0,n=0; for(const id of S.gpuOrder){ const g=S.gpus[id]; if(g){pw+=g.power_draw_w||0;n++;} }
-  $("tPower").innerHTML = n?Math.round(pw)+'<small>W</small>':'—<small>W</small>';
-  $("tPowerSub").textContent = n+" GPU"+(n===1?"":"s")+" · "+Math.round(n*POWER_MAX)+"W cap";
-  const _kwh=S.energyWh/1000, _cost=_kwh*S.powerRate;
-  $("tPowerCost").innerHTML = "Est. $"+_cost.toFixed(_cost<1?4:2)+" · "+_kwh.toFixed(3)+" kWh · "
-    + '<span style="text-decoration:underline dotted;text-decoration-color:var(--accent);text-underline-offset:2px">$'+S.powerRate.toFixed(2)+"/kWh</span>";
+  // System power tile is driven server-side by pollEnergy()/renderPower() — the
+  // sampler in serve.py accumulates energy whether or not this page is open.
 
   // context window: prompt+output ≈ current KV occupancy vs the model's ctx-size (live n_ctx when generating)
   const maxTok = slot&&slot.nctx ? slot.nctx : (S.running ? S.ctxById[S.running.id] : null);
@@ -533,11 +526,6 @@ async function pollPerf(){
     (d.gpu_stats||[]).forEach(g=>{ latest[g.id]=g; });
     S.gpus=latest;
     S.gpuOrder=Object.keys(latest).map(Number).sort((a,b)=>a-b);
-    // integrate session energy (trapezoidal) from the fresh power sample for the cost meter
-    { let tw=0; for(const id of S.gpuOrder){ tw+=(latest[id].power_draw_w)||0; }
-      const tnow=Date.now();
-      if(S.energyTs!=null){ S.energyWh += (S.prevW+tw)/2 * (tnow-S.energyTs)/3.6e6; try{localStorage.setItem("rig-energywh",String(S.energyWh));}catch(e){} }
-      S.energyTs=tnow; S.prevW=tw; }
     // system: last sys sample
     const sys=d.sys_stats||[]; S.sys= sys.length? sys[sys.length-1]:null;
     if(!S.seeded){
@@ -757,21 +745,43 @@ try{ const v=parseFloat(localStorage.getItem("rig-logfs")); S.logFont=(v>=LOGFS.
 function applyLogFont(){ document.documentElement.style.setProperty("--logfs",S.logFont+"px"); try{localStorage.setItem("rig-logfs",String(S.logFont));}catch(e){} }
 applyLogFont();
 
-/* GPU power cost meter — electricity rate persisted; session energy resets on page reload */
-try{ const v=parseFloat(localStorage.getItem("rig-powerrate")); S.powerRate=(isFinite(v)&&v>=0)?v:POWER_RATE_DEF; }catch(e){ S.powerRate=POWER_RATE_DEF; }
-try{ const e=parseFloat(localStorage.getItem("rig-energywh")); if(isFinite(e)&&e>=0) S.energyWh=e; }catch(e){}
-$("tPowerCost").addEventListener("click",()=>{
-  const v=prompt("Electricity rate in $ per kWh (what you pay for power):", String(S.powerRate));
+/* System power / energy meter — driven entirely by the server-side sampler
+   (serve.py PowerMeter -> sqlite). Rate + accumulated total are global across
+   browsers and keep growing even with no tab open. */
+function renderPower(e){
+  if(!e){ return; }
+  const w = e.sys_w!=null ? e.sys_w : e.gpu_w;
+  $("tPower").innerHTML = (w!=null?Math.round(w):"—")+'<small>W</small>';
+  const g=Math.round(e.gpu_w||0), c=Math.round(e.cpu_w||0), d=Math.round(e.dram_w||0);
+  $("tPowerSub").textContent = g+"W GPU · "+c+"W CPU · "+d+"W DRAM · +"+Math.round(e.base_w||0)+"W ÷"+(e.psu_eff||1).toFixed(2);
+  const kwh=(e.sys_wh||0)/1000, cost=e.sys_cost||0, rate=e.rate||0;
+  $("tPowerCost").innerHTML = "$"+cost.toFixed(cost<1?4:2)+" · "+kwh.toFixed(3)+" kWh · "
+    + '<span style="text-decoration:underline dotted;text-decoration-color:var(--accent);text-underline-offset:2px">$'+rate.toFixed(2)+"/kWh</span>";
+}
+async function pollEnergy(){
+  try{
+    const r=await fetch("/_energy",{cache:"no-store"});
+    if(!r.ok) return;
+    S.energy=await r.json(); renderPower(S.energy);
+  }catch(e){}
+}
+$("tPowerCost").addEventListener("click",async()=>{
+  const cur=S.energy&&S.energy.rate!=null?S.energy.rate:0.15;
+  const v=prompt("Electricity rate in $ per kWh (what you pay for power):", String(cur));
   if(v==null) return;
-  const r=parseFloat(v);
-  if(isFinite(r)&&r>=0){ S.powerRate=r; try{localStorage.setItem("rig-powerrate",String(r));}catch(e){} renderTiles(); }
-  else alert("Enter a non-negative number, e.g. 0.15");
+  const rate=parseFloat(v);
+  if(!(isFinite(rate)&&rate>=0)){ alert("Enter a non-negative number, e.g. 0.15"); return; }
+  try{
+    const r=await fetch("/_energy/rate",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({rate})});
+    if(r.ok){ S.energy=await r.json(); renderPower(S.energy); }
+  }catch(e){}
 });
-$("tPowerReset").addEventListener("click",()=>{
-  if(!confirm("Reset the accumulated GPU energy/cost total?")) return;
-  S.energyWh=0; S.energyTs=null; S.prevW=0;
-  try{ localStorage.setItem("rig-energywh","0"); }catch(e){}
-  renderTiles();
+$("tPowerReset").addEventListener("click",async()=>{
+  if(!confirm("Reset the accumulated system energy/cost total? (server-side, affects all viewers)")) return;
+  try{
+    const r=await fetch("/_energy/reset",{method:"POST"});
+    if(r.ok){ S.energy=await r.json(); renderPower(S.energy); }
+  }catch(e){}
 });
 $("btnFsDown").onclick=()=>{ S.logFont=Math.max(LOGFS.min,S.logFont-1); applyLogFont(); };
 $("btnFsUp").onclick  =()=>{ S.logFont=Math.min(LOGFS.max,S.logFont+1); applyLogFont(); };
@@ -800,6 +810,7 @@ applyTheme(currentTheme());           // sync icon + series colors to the pre-pa
 renderCards(); renderTiles(); redrawCharts();
 connect();
 pollPerf(); setInterval(pollPerf, PERF_MS);
+pollEnergy(); setInterval(pollEnergy, ENERGY_MS);
 
 /* screenshot helper: ?shot closes the endless SSE so headless virtual-time can settle */
 if(location.search.includes("shot")) setTimeout(()=>{ try{es&&es.close();}catch{} }, 4000);

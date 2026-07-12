@@ -43,6 +43,7 @@ Live token counts come from the llama-server `/slots` endpoint. It is **not** re
 - GPU stats come from llama-swap's performance monitor (nvidia-smi / LACT / rocm-smi) — nothing to install here.
 - **Python 3** (standard library only — no `pip install`).
 - The llama-server upstream, whose port llama-swap assigns per-model via `${PORT}`; `serve.py` discovers it from `/running` (see `_current_upstream`), so no fixed upstream port is assumed.
+- **(Optional) Intel RAPL access** for the whole-system power estimate — see the udev rule step below. Without it the sampler still runs and records GPU energy; it just can't add CPU/DRAM to the wall estimate (unless the service user has passwordless sudo, which it self-heals with).
 
 ## Install
 
@@ -76,6 +77,18 @@ loginctl enable-linger "$USER"
 
 Check it: `systemctl --user status llama-dashboard` · logs: `journalctl --user -u llama-dashboard -f`.
 
+### (Optional) Enable whole-system power — Intel RAPL
+
+The power tile estimates **wall (AC) draw** as `(GPU + CPU + DRAM + baseline) ÷ PSU efficiency`. CPU + DRAM come from Intel RAPL, whose `energy_uj` counters are root-only by default. A udev rule (included) makes them world-readable and persists across reboots:
+
+```bash
+sudo cp 99-rapl-readable.rules /etc/udev/rules.d/
+sudo udevadm control --reload-rules
+sudo udevadm trigger --subsystem-match=powercap --action=change
+```
+
+Skip this and the sampler still records GPU energy — it just drops the CPU/DRAM terms (or, if the service user has passwordless sudo, self-heals by reading them via `sudo`). Intel CPUs only.
+
 ## Configuration
 
 Everything is a small edit near the top of the two files:
@@ -85,6 +98,7 @@ Everything is a small edit near the top of the two files:
 - **Bar thresholds** — `index.html`: GPU/system meters use `loadColor(pct, 60, 80)`; the context bar switches at 60% / 80%. Adjust to taste.
 - **Poll intervals / history depth** — `index.html` top of `<script>`: `PERF_MS` (perf poll), `HIST` (util history points), `DEC_HIST`, `LOG_CAP`, and the `/slots` interval in `onInflight`.
 - **Power bar scale** — `POWER_MAX` (per-GPU TDP in watts).
+- **Whole-system power model** — `serve.py`: `BASE_W` (mobo/drives/fans baseline, DC watts) and `PSU_EFF` (PSU DC→AC efficiency) are the only *estimated* terms in the wall figure; override without editing via `RIG_BASE_W` / `RIG_PSU_EFF` env vars. Set them from a Kill-A-Watt reading to calibrate. `SAMPLE_INTERVAL` (sampler period) and `RETAIN_DAYS` (time-series retention) also live here. Accumulated energy + $/kWh rate persist in `power.db` (sqlite, gitignored) and are global across browsers; reset via the ↺ on the tile.
 
 ## Notes
 
@@ -97,3 +111,4 @@ Everything is a small edit near the top of the two files:
 - `index.html` — the entire dashboard (UI + all logic).
 - `serve.py` — same-origin static server + swap-safe API proxy.
 - `llama-dashboard.service` — systemd user unit.
+- `99-rapl-readable.rules` — optional udev rule granting non-root read access to Intel RAPL energy counters (CPU/DRAM power).

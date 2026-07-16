@@ -35,6 +35,11 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 RIG_NAME = os.environ.get("RIG_NAME", "").strip() or socket.gethostname()
 RIG_LABEL = f"{RIG_NAME} monitor"
 
+# Read-only SWE-bench results DB (written by ~/swebench-runs/ingest.py). Served at
+# /_swebench (JSON) and /swebench (page). Opened read-only so serving can never
+# lock or corrupt a DB that ingest.py / grade.sh may be writing concurrently.
+SWEBENCH_DB = os.environ.get("SWEBENCH_DB", "/home/dwright/swebench-runs/results.db")
+
 # ---------------------------------------------------------------------------
 # Power / energy accounting
 # ---------------------------------------------------------------------------
@@ -58,6 +63,10 @@ RAPL_DRAM = "/sys/class/powercap/intel-rapl:0:1/energy_uj"  # DRAM domain
 BASE_W = float(os.environ.get("RIG_BASE_W", "30"))         # mobo/drives/fans/NIC baseline (DC W)
 PSU_EFF = float(os.environ.get("RIG_PSU_EFF", "0.90"))     # PSU DC->AC efficiency
 RATE_DEFAULT = 0.15                    # $/kWh until set from the UI
+# Each sample is classified inference ("busy") vs idle from GPU utilization, so the
+# UI can show where the cost goes. A sample counts as inference when any GPU's
+# utilization is >= this %; below it the box is drawing power without doing work.
+GPU_BUSY_UTIL = float(os.environ.get("RIG_BUSY_UTIL", "5"))
 
 
 class PowerMeter:
@@ -78,9 +87,30 @@ class PowerMeter:
         self._ticks = 0
         # resume the running totals across restarts from the newest stored sample
         row = self.db.execute(
-            "SELECT gpu_wh, sys_wh FROM samples ORDER BY ts DESC LIMIT 1").fetchone()
+            "SELECT gpu_wh, sys_wh, busy_wh, idle_wh, busy_s, idle_s "
+            "FROM samples ORDER BY ts DESC LIMIT 1").fetchone()
         self.cum_gpu_wh = row[0] if row else 0.0
         self.cum_sys_wh = row[1] if row else 0.0
+        # inference-vs-idle split of the SYSTEM energy/time. Invariant kept going
+        # forward: cum_busy_wh + cum_idle_wh == cum_sys_wh. On a DB predating this
+        # split (columns just added -> NULL), seed all prior energy as idle, since
+        # the rig sits idle the vast majority of the time; the split then diverges
+        # correctly from here (hit reset in the UI for a clean-slate breakdown).
+        if row and row[2] is not None:
+            self.cum_busy_wh, self.cum_idle_wh = row[2], row[3]
+            self.cum_busy_s, self.cum_idle_s = row[4] or 0.0, row[5] or 0.0
+        else:
+            self.cum_busy_wh, self.cum_idle_wh = 0.0, self.cum_sys_wh
+            self.cum_busy_s, self.cum_idle_s = 0.0, 0.0
+            # Align the split's reset baseline with the existing system baseline so
+            # the breakdown sums to the already-displayed "since reset" total right
+            # away (the seed dumped ALL historical energy into idle above, including
+            # energy from before the last reset — net it back out here). Only runs
+            # the one time a pre-split DB is migrated.
+            self.db.execute("UPDATE state SET v=0 WHERE k='reset_busy_wh'")
+            self.db.execute("UPDATE state SET v=(SELECT v FROM state WHERE k='reset_sys_wh') "
+                            "WHERE k='reset_idle_wh'")
+            self.db.commit()
 
     # ---- setup -----------------------------------------------------------
     def _init_schema(self):
@@ -89,13 +119,24 @@ class PowerMeter:
             CREATE TABLE IF NOT EXISTS samples(
                 ts     INTEGER PRIMARY KEY,   -- unix seconds
                 gpu_w  REAL, cpu_w REAL, dram_w REAL, sys_w REAL,
-                gpu_wh REAL, sys_wh REAL      -- cumulative running totals at this ts
+                gpu_wh REAL, sys_wh REAL,     -- cumulative running totals at this ts
+                busy   INTEGER,               -- 1 = inference (GPU util >= threshold) this sample
+                busy_wh REAL, idle_wh REAL,   -- cumulative system Wh split by inference/idle
+                busy_s  REAL, idle_s  REAL    -- cumulative seconds split by inference/idle
             );
             CREATE TABLE IF NOT EXISTS state(k TEXT PRIMARY KEY, v REAL);
             """
         )
+        # migrate DBs created before the inference/idle split existed
+        have = {r[1] for r in self.db.execute("PRAGMA table_info(samples)")}
+        for col, decl in (("busy", "INTEGER"), ("busy_wh", "REAL"), ("idle_wh", "REAL"),
+                          ("busy_s", "REAL"), ("idle_s", "REAL")):
+            if col not in have:
+                self.db.execute(f"ALTER TABLE samples ADD COLUMN {col} {decl}")
         for k, v in (("rate", RATE_DEFAULT), ("reset_gpu_wh", 0.0),
-                     ("reset_sys_wh", 0.0), ("reset_ts", 0.0)):
+                     ("reset_sys_wh", 0.0), ("reset_ts", 0.0),
+                     ("reset_busy_wh", 0.0), ("reset_idle_wh", 0.0),
+                     ("reset_busy_s", 0.0), ("reset_idle_s", 0.0)):
             self.db.execute("INSERT OR IGNORE INTO state(k, v) VALUES(?, ?)", (k, v))
         self.db.commit()
 
@@ -143,33 +184,47 @@ class PowerMeter:
             d += wrap
         return d if d >= 0 else 0
 
-    def _gpu_watts(self):
+    def _gpu_sample(self):
+        """Return (total_board_watts, busy) or (None, False). `busy` is True when
+        any GPU is utilized past GPU_BUSY_UTIL, i.e. the rig is doing inference
+        rather than sitting idle."""
         # primary source: llama-swap's performance ring (already server-side, no CORS)
         try:
             with urllib.request.urlopen(UPSTREAM + "/api/performance", timeout=3) as r:
                 d = json.load(r)
-            latest = {}
+            latest = {}   # keep only the newest row per GPU id (ring holds a history)
             for g in d.get("gpu_stats") or []:
-                latest[g.get("id")] = g.get("power_draw_w") or 0.0
+                latest[g.get("id")] = g
             if latest:
-                return sum(latest.values())
+                power = sum((g.get("power_draw_w") or 0.0) for g in latest.values())
+                busy = any((g.get("gpu_util_pct") or 0.0) >= GPU_BUSY_UTIL
+                           for g in latest.values())
+                return power, busy
         except Exception:
             pass
         # fallback: query nvidia-smi directly (works even if no model is loaded)
         try:
             r = subprocess.run(
-                ["nvidia-smi", "--query-gpu=power.draw", "--format=csv,noheader,nounits"],
+                ["nvidia-smi", "--query-gpu=power.draw,utilization.gpu",
+                 "--format=csv,noheader,nounits"],
                 capture_output=True, text=True, timeout=5)
             if r.returncode == 0:
-                return sum(float(x) for x in r.stdout.split() if x.strip())
+                power = busy = 0.0
+                for line in r.stdout.strip().splitlines():
+                    parts = [p.strip() for p in line.split(",")]
+                    if len(parts) < 2:
+                        continue
+                    power += float(parts[0])
+                    busy = busy or float(parts[1]) >= GPU_BUSY_UTIL
+                return power, bool(busy)
         except Exception:
             pass
-        return None
+        return None, False
 
     # ---- sampling loop ---------------------------------------------------
     def tick(self):
         now = time.time()
-        gpu_w = self._gpu_watts()
+        gpu_w, busy = self._gpu_sample()
         pkg, dram = self._rapl_pair()
 
         cpu_w = dram_w = None
@@ -191,16 +246,29 @@ class PowerMeter:
             if 0 < dt < MAX_GAP_S:
                 self.cum_gpu_wh += (self.prev_gpu_w + gpu_w) / 2 * dt / 3600
                 pw = self.prev_sys_w if self.prev_sys_w is not None else sys_w
-                self.cum_sys_wh += (pw + sys_w) / 2 * dt / 3600
+                inc_wh = (pw + sys_w) / 2 * dt / 3600
+                self.cum_sys_wh += inc_wh
+                # attribute this interval to inference or idle (keeps the invariant
+                # cum_busy_wh + cum_idle_wh == cum_sys_wh going forward)
+                if busy:
+                    self.cum_busy_wh += inc_wh
+                    self.cum_busy_s += dt
+                else:
+                    self.cum_idle_wh += inc_wh
+                    self.cum_idle_s += dt
         self.prev_ts, self.prev_gpu_w, self.prev_sys_w = now, gpu_w, sys_w
 
         snap = {"ts": now, "gpu_w": gpu_w, "cpu_w": cpu, "dram_w": drm, "sys_w": sys_w,
-                "gpu_wh": self.cum_gpu_wh, "sys_wh": self.cum_sys_wh}
+                "gpu_wh": self.cum_gpu_wh, "sys_wh": self.cum_sys_wh, "busy": busy}
         with self.lock:
             self.latest = snap
-            self.db.execute("INSERT OR REPLACE INTO samples VALUES(?,?,?,?,?,?,?)",
-                            (int(now), gpu_w, cpu, drm, sys_w,
-                             self.cum_gpu_wh, self.cum_sys_wh))
+            self.db.execute(
+                "INSERT OR REPLACE INTO samples"
+                "(ts,gpu_w,cpu_w,dram_w,sys_w,gpu_wh,sys_wh,busy,busy_wh,idle_wh,busy_s,idle_s)"
+                " VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
+                (int(now), gpu_w, cpu, drm, sys_w, self.cum_gpu_wh, self.cum_sys_wh,
+                 1 if busy else 0, self.cum_busy_wh, self.cum_idle_wh,
+                 self.cum_busy_s, self.cum_idle_s))
             self.db.commit()
 
     def run(self):
@@ -224,15 +292,23 @@ class PowerMeter:
             rate = self._state("rate")
             gpu_wh = max(0.0, self.cum_gpu_wh - self._state("reset_gpu_wh"))
             sys_wh = max(0.0, self.cum_sys_wh - self._state("reset_sys_wh"))
+            busy_wh = max(0.0, self.cum_busy_wh - self._state("reset_busy_wh"))
+            idle_wh = max(0.0, self.cum_idle_wh - self._state("reset_idle_wh"))
+            busy_s = max(0.0, self.cum_busy_s - self._state("reset_busy_s"))
+            idle_s = max(0.0, self.cum_idle_s - self._state("reset_idle_s"))
             since = self._state("reset_ts")
         return {
             "gpu_w": s.get("gpu_w"), "cpu_w": s.get("cpu_w"),
             "dram_w": s.get("dram_w"), "sys_w": s.get("sys_w"),
-            "sample_ts": s.get("ts"),
+            "sample_ts": s.get("ts"), "busy": s.get("busy"),
             "gpu_wh": gpu_wh, "sys_wh": sys_wh,
             "rate": rate, "gpu_cost": gpu_wh / 1000 * rate, "sys_cost": sys_wh / 1000 * rate,
+            # inference-vs-idle split of the system energy/cost/time since last reset
+            "busy_wh": busy_wh, "idle_wh": idle_wh,
+            "busy_cost": busy_wh / 1000 * rate, "idle_cost": idle_wh / 1000 * rate,
+            "busy_s": busy_s, "idle_s": idle_s,
             "since_ts": since, "interval": SAMPLE_INTERVAL,
-            "base_w": BASE_W, "psu_eff": PSU_EFF,
+            "base_w": BASE_W, "psu_eff": PSU_EFF, "busy_util": GPU_BUSY_UTIL,
         }
 
     def set_rate(self, r):
@@ -244,6 +320,10 @@ class PowerMeter:
         with self.lock:
             self.db.execute("UPDATE state SET v=? WHERE k='reset_gpu_wh'", (self.cum_gpu_wh,))
             self.db.execute("UPDATE state SET v=? WHERE k='reset_sys_wh'", (self.cum_sys_wh,))
+            self.db.execute("UPDATE state SET v=? WHERE k='reset_busy_wh'", (self.cum_busy_wh,))
+            self.db.execute("UPDATE state SET v=? WHERE k='reset_idle_wh'", (self.cum_idle_wh,))
+            self.db.execute("UPDATE state SET v=? WHERE k='reset_busy_s'", (self.cum_busy_s,))
+            self.db.execute("UPDATE state SET v=? WHERE k='reset_idle_s'", (self.cum_idle_s,))
             self.db.execute("UPDATE state SET v=? WHERE k='reset_ts'", (time.time(),))
             self.db.commit()
 
@@ -292,8 +372,35 @@ class Handler(http.server.BaseHTTPRequestHandler):
             return None
         return running[0].get("proxy") if running else None
 
+    def _swebench(self):
+        """Serve the SWE-bench results DB as JSON (read-only). Returns a friendly
+        empty payload (200) if the DB is missing/locked so the page degrades nicely."""
+        try:
+            con = sqlite3.connect(f"file:{SWEBENCH_DB}?mode=ro", uri=True, timeout=2)
+            con.row_factory = sqlite3.Row
+            try:
+                runs = [dict(r) for r in con.execute("SELECT * FROM run_summary ORDER BY run_id")]
+                results = [dict(r) for r in con.execute(
+                    "SELECT run_id, instance_id, exit_status, n_steps, cost, patch_chars, "
+                    "has_patch, resolved, error, empty_patch, graded FROM results "
+                    "ORDER BY run_id, instance_id")]
+                meta = dict(con.execute(
+                    "SELECT COUNT(*) AS runs, "
+                    "(SELECT COUNT(*) FROM results) AS instances FROM runs").fetchone())
+            finally:
+                con.close()
+            self._json({"ok": True, "runs": runs, "results": results, "meta": meta})
+        except Exception as e:
+            self._json({"ok": False, "error": str(e), "runs": [], "results": [], "meta": {}})
+
     def do_GET(self):
         route = self.path.split("?", 1)[0]
+        if route == "/_swebench":
+            self._swebench()
+            return
+        if route == "/swebench" or route == "/swebench.html":
+            self._serve_file("swebench.html")
+            return
         if route == "/_slots":
             # live token counts, read straight from the loaded llama-server (never swaps a model)
             base = self._current_upstream()

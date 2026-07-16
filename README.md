@@ -12,6 +12,7 @@ A single-page, real-time monitoring dashboard for a [llama-swap](https://github.
 - **Prompt / decode throughput** — live tokens/sec while a request is generating; `0` when idle.
 - **Session tokens** — input + output of the current request (tracks the live conversation; resets when the client clears context).
 - **Context window** — a color-coded bar of current KV occupancy vs the model's `--ctx-size` (green → yellow at 60% → red at 80%), with percent free.
+- **System power** — estimated wall (AC) draw, plus an always-accumulating energy + cost total (`$/kWh`, global across browsers). **Hover the cost** for a donut breakdown of where the cost goes — **inference vs idle** — with each side's cost, share, kWh, and time.
 - **Per-GPU cards** — utilization, VRAM, power (same 60/80% thresholds), plus temp / fan / memory-util.
 - **System card** — CPU (per-core) and RAM.
 - **Charts** — rolling GPU-utilization (per card) and decode-throughput history.
@@ -89,6 +90,12 @@ sudo udevadm trigger --subsystem-match=powercap --action=change
 
 Skip this and the sampler still records GPU energy — it just drops the CPU/DRAM terms (or, if the service user has passwordless sudo, self-heals by reading them via `sudo`). Intel CPUs only.
 
+### Inference-vs-idle cost breakdown
+
+Every sample is tagged **inference** or **idle** from GPU utilization (any GPU busier than `RIG_BUSY_UTIL`, default 5% → inference), and the system energy for each interval is banked into the matching bucket. Hovering the cost line on the power tile shows the split as a donut — so you can see how much of the bill is real work vs. the box sitting powered-on. The invariant `busy + idle == total` is maintained, so the two slices always sum to the number on the tile.
+
+The `power.db` schema is migrated automatically on startup (new columns are added in place — no manual step, and older `serve.py` still reads the DB fine). On an existing DB, energy accrued *before* this feature is all counted as idle; hit the ↺ reset once for a clean-slate breakdown going forward.
+
 ## Configuration
 
 Everything is a small edit near the top of the two files:
@@ -99,6 +106,7 @@ Everything is a small edit near the top of the two files:
 - **Poll intervals / history depth** — `index.html` top of `<script>`: `PERF_MS` (perf poll), `HIST` (util history points), `DEC_HIST`, `LOG_CAP`, and the `/slots` interval in `onInflight`.
 - **Power bar scale** — `POWER_MAX` (per-GPU TDP in watts).
 - **Whole-system power model** — `serve.py`: `BASE_W` (mobo/drives/fans baseline, DC watts) and `PSU_EFF` (PSU DC→AC efficiency) are the only *estimated* terms in the wall figure; override without editing via `RIG_BASE_W` / `RIG_PSU_EFF` env vars. Set them from a Kill-A-Watt reading to calibrate. `SAMPLE_INTERVAL` (sampler period) and `RETAIN_DAYS` (time-series retention) also live here. Accumulated energy + $/kWh rate persist in `power.db` (sqlite, gitignored) and are global across browsers; reset via the ↺ on the tile.
+- **Inference-vs-idle threshold** — `serve.py`: `RIG_BUSY_UTIL` env var (default `5`) — the GPU-utilization percent above which a sample counts as *inference* rather than *idle* in the cost breakdown.
 
 ## Notes
 

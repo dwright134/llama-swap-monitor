@@ -96,6 +96,23 @@
   .tile .val.accent{color:var(--accent)}
   .tile .sub{margin-top:7px;font-size:11px;color:var(--muted)}
   .tile .sub .sep{color:var(--muted-2);margin:0 6px}
+
+  /* cost breakdown popover (inference vs idle) — appears on hover over the cost line */
+  .costline{position:relative}
+  .costpop{position:absolute;left:0;bottom:calc(100% + 10px);width:256px;z-index:20;
+    background:var(--tip-bg);border:1px solid var(--border-2);border-radius:10px;padding:12px 13px;
+    box-shadow:0 12px 32px rgba(0,0,0,.5);opacity:0;transform:translateY(4px);pointer-events:none;
+    transition:opacity .12s ease,transform .12s ease}
+  .costline:hover .costpop{opacity:1;transform:translateY(0)}
+  .costpop .ttl{font-size:10px;letter-spacing:.05em;text-transform:uppercase;color:var(--muted);margin-bottom:10px}
+  .costpop .pierow{display:flex;gap:14px;align-items:center}
+  .costpop svg{flex:0 0 auto;display:block}
+  .costpop .lg{flex:1;display:flex;flex-direction:column;gap:9px;min-width:0}
+  .costpop .lg .it .h{display:flex;align-items:center;gap:6px;color:var(--text);font-weight:600;font-size:11px}
+  .costpop .lg .it .h .sw{width:9px;height:9px;border-radius:2px;flex:0 0 auto}
+  .costpop .lg .it .h .pc{margin-left:auto;color:var(--muted);font-weight:500;font-variant-numeric:tabular-nums}
+  .costpop .lg .it .d{color:var(--muted);margin-top:2px;font-size:10px;font-variant-numeric:tabular-nums;padding-left:15px}
+  .costpop .ft{margin-top:11px;padding-top:9px;border-top:1px solid var(--border);font-size:9.5px;color:var(--muted-2);line-height:1.5}
   .badge{display:inline-block;padding:2px 8px;border-radius:6px;font-size:10px;letter-spacing:.08em;
          text-transform:uppercase;font-weight:600;border:1px solid transparent}
   .badge.serving{color:var(--accent);border-color:rgba(53,208,127,.35);background:rgba(53,208,127,.08)}
@@ -202,7 +219,8 @@
     <div class="lbl">System power <span style="opacity:.45;font-weight:400">est.</span></div>
     <div class="val mono-num" id="tPower">—<small>W</small></div>
     <div class="sub" id="tPowerSub" title="Estimated wall (AC) draw = (GPU + CPU + DRAM + baseline) ÷ PSU efficiency">wall estimate</div>
-    <div class="sub"><span id="tPowerCost" title="Energy + cost since last reset — always accumulating (server-side). Click to set your electricity rate ($/kWh)" style="cursor:pointer">—</span> <span id="tPowerReset" title="Reset the accumulated total" style="cursor:pointer;opacity:.6;font-size:1.25em;vertical-align:-2px">↺</span></div>
+    <div class="sub costline"><span id="tPowerCost" title="Energy + cost since last reset — always accumulating (server-side). Hover for the inference-vs-idle breakdown. Click to set your electricity rate ($/kWh)" style="cursor:pointer">—</span> <span id="tPowerReset" title="Reset the accumulated total" style="cursor:pointer;opacity:.6;font-size:1.25em;vertical-align:-2px">↺</span>
+      <div class="costpop" id="costPop" aria-hidden="true"></div></div>
   </div>
 </div>
 
@@ -757,6 +775,45 @@ function renderPower(e){
   const kwh=(e.sys_wh||0)/1000, cost=e.sys_cost||0, rate=e.rate||0;
   $("tPowerCost").innerHTML = "$"+cost.toFixed(cost<1?4:2)+" · "+kwh.toFixed(3)+" kWh · "
     + '<span style="text-decoration:underline dotted;text-decoration-color:var(--accent);text-underline-offset:2px">$'+rate.toFixed(2)+"/kWh</span>";
+  renderCostBreakdown(e);
+}
+/* Human-readable duration for the cost popover ("3d 4h", "12m", …). */
+function fmtDur(s){
+  s=Math.max(0,Math.round(s));
+  const d=Math.floor(s/86400), h=Math.floor(s%86400/3600), m=Math.floor(s%3600/60);
+  if(d) return d+"d "+h+"h";
+  if(h) return h+"h "+m+"m";
+  if(m) return m+"m";
+  return s+"s";
+}
+/* Hover popover: donut of where the system energy cost goes — inference vs idle.
+   Proportions use energy (== cost, since both scale by the same $/kWh rate). */
+function renderCostBreakdown(e){
+  const pop=$("costPop"); if(!pop||!e) return;
+  const bWh=e.busy_wh||0, iWh=e.idle_wh||0, tot=bWh+iWh, bf=tot>0?bWh/tot:0;
+  const infer=cssv("--accent"), idle=cssv("--g0");
+  const pct = v => (v>0&&v<0.001?(v*100).toFixed(2):v<0.1?(v*100).toFixed(1):Math.round(v*100))+"%";
+  const money = v => "$"+(v||0).toFixed((v||0)<1?4:2);
+  const r=40, C=2*Math.PI*r, cx=54, cy=54, inferLen=bf*C;
+  const svg = tot>0
+    ? '<svg width="94" height="94" viewBox="0 0 108 108" role="img" aria-label="inference vs idle cost split">'
+      +  '<circle cx="'+cx+'" cy="'+cy+'" r="'+r+'" fill="none" stroke="'+idle+'" stroke-width="16"/>'
+      +  '<circle cx="'+cx+'" cy="'+cy+'" r="'+r+'" fill="none" stroke="'+infer+'" stroke-width="16"'
+      +    ' stroke-dasharray="'+inferLen.toFixed(2)+' '+(C-inferLen).toFixed(2)+'" transform="rotate(-90 '+cx+' '+cy+')"/>'
+      +  '<text x="'+cx+'" y="'+(cy-2)+'" text-anchor="middle" font-size="17" font-weight="700" fill="var(--text)">'+pct(bf)+'</text>'
+      +  '<text x="'+cx+'" y="'+(cy+12)+'" text-anchor="middle" font-size="8" letter-spacing=".08em" fill="var(--muted)">INFERENCE</text>'
+      + '</svg>'
+    : '<svg width="94" height="94" viewBox="0 0 108 108"><circle cx="54" cy="54" r="40" fill="none" stroke="var(--border-2)" stroke-width="16"/></svg>';
+  pop.innerHTML =
+      '<div class="ttl">Where the energy cost goes</div>'
+    + '<div class="pierow">'+svg+'<div class="lg">'
+    +   '<div class="it"><div class="h"><span class="sw" style="background:'+infer+'"></span>Inference<span class="pc">'+pct(bf)+'</span></div>'
+    +     '<div class="d">'+money(e.busy_cost)+' · '+(bWh/1000).toFixed(3)+' kWh · '+fmtDur(e.busy_s||0)+'</div></div>'
+    +   '<div class="it"><div class="h"><span class="sw" style="background:'+idle+'"></span>Idle<span class="pc">'+pct(1-bf)+'</span></div>'
+    +     '<div class="d">'+money(e.idle_cost)+' · '+(iWh/1000).toFixed(3)+' kWh · '+fmtDur(e.idle_s||0)+'</div></div>'
+    + '</div></div>'
+    + '<div class="ft">Idle = powered on with GPUs under '+(e.busy_util!=null?e.busy_util:5)+'% util. '
+    +   'Split of system energy since last reset'+(tot>0?'':' — no samples yet')+'.</div>';
 }
 async function pollEnergy(){
   try{

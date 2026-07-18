@@ -12,6 +12,7 @@
     --accent:#35d07f;            /* serving / healthy green */
     --good:#35c46a; --warn:#f2b134; --crit:#e5544b;
     --g0:#3987e5; --g1:#2bb98a; --g2:#e0a72e;   /* GPU line series (validated set) */
+    --cpu:#9b8cff;               /* CPU utilization line (distinct from GPU/decode) */
     /* theme-specific surfaces (overridden in light mode) */
     --tip-bg:#0a0c0f; --scroll:#2a3038; --track-border:rgba(255,255,255,.03);
     --log-text:#b7c0cc; --log-warn:#f0c674; --log-error:#ef9a9a;
@@ -26,6 +27,7 @@
     --accent:#12a05f;            /* darkened green for contrast on light */
     --good:#199e57; --warn:#b3810a; --crit:#d23a30;
     --g0:#2f6fd0; --g1:#158a66; --g2:#b3821a;
+    --cpu:#6d5bd0;
     --tip-bg:#f8f9fb; --scroll:#c3c8d1; --track-border:rgba(0,0,0,.05);
     --log-text:#38414d; --log-warn:#8a6200; --log-error:#c0392b;
   }
@@ -38,7 +40,7 @@
   /* Smaller screens: log box gets a fixed 600px height, the whole PAGE scrolls,
      and the log box scrolls separately inside that 600px. Triggered when the
      viewport is short OR narrow enough to hit the responsive reflow (max-width
-     matches the .charts single-column breakpoint below). */
+     matches the .cards single-column breakpoint below). */
   @media (max-height:1000px), (max-width:1100px){
     body{height:auto;min-height:100vh;overflow-y:auto}
     .logpanel{flex:none;min-height:0;height:600px}
@@ -74,8 +76,8 @@
   .grid{display:grid;gap:12px}
   .tiles{grid-template-columns:repeat(5,1fr);margin-bottom:12px}
   .cards{grid-template-columns:repeat(4,1fr);margin-bottom:12px}
-  .charts{grid-template-columns:1fr 1fr;margin-bottom:12px}
-  @media(max-width:1100px){.tiles{grid-template-columns:repeat(3,1fr)}.cards{grid-template-columns:repeat(2,1fr)}.charts{grid-template-columns:1fr}}
+  .contents{display:contents}   /* children become grid items of the parent grid */
+  @media(max-width:1100px){.tiles{grid-template-columns:repeat(3,1fr)}.cards{grid-template-columns:repeat(2,1fr)}}
   @media(max-width:640px){.tiles{grid-template-columns:1fr 1fr}.cards{grid-template-columns:1fr}}
 
   .panel{background:var(--panel);border:1px solid var(--border);border-radius:var(--radius);padding:14px 16px}
@@ -99,9 +101,9 @@
 
   /* cost breakdown popover (inference vs idle) — appears on hover over the cost line */
   .costline{position:relative}
-  .costpop{position:absolute;left:0;bottom:calc(100% + 10px);width:256px;z-index:20;
+  .costpop{position:absolute;left:0;top:calc(100% + 10px);width:256px;z-index:20;
     background:var(--tip-bg);border:1px solid var(--border-2);border-radius:10px;padding:12px 13px;
-    box-shadow:0 12px 32px rgba(0,0,0,.5);opacity:0;transform:translateY(4px);pointer-events:none;
+    box-shadow:0 12px 32px rgba(0,0,0,.5);opacity:0;transform:translateY(-4px);pointer-events:none;
     transition:opacity .12s ease,transform .12s ease}
   .costline:hover .costpop{opacity:1;transform:translateY(0)}
   .costpop .ttl{font-size:10px;letter-spacing:.05em;text-transform:uppercase;color:var(--muted);margin-bottom:10px}
@@ -219,7 +221,7 @@
     <div class="lbl">System power <span style="opacity:.45;font-weight:400">est.</span></div>
     <div class="val mono-num" id="tPower">—<small>W</small></div>
     <div class="sub" id="tPowerSub" title="Estimated wall (AC) draw = (GPU + CPU + DRAM + baseline) ÷ PSU efficiency">wall estimate</div>
-    <div class="sub costline"><span id="tPowerCost" title="Energy + cost since last reset — always accumulating (server-side). Hover for the inference-vs-idle breakdown. Click to set your electricity rate ($/kWh)" style="cursor:pointer">—</span> <span id="tPowerReset" title="Reset the accumulated total" style="cursor:pointer;opacity:.6;font-size:1.25em;vertical-align:-2px">↺</span>
+    <div class="sub costline"><span id="tPowerCost" style="cursor:pointer">—</span> <span id="tPowerReset" title="Reset the accumulated total" style="cursor:pointer;opacity:.6;font-size:1.25em;vertical-align:-2px">↺</span>
       <div class="costpop" id="costPop" aria-hidden="true"></div></div>
   </div>
 </div>
@@ -233,11 +235,17 @@
   <div class="track ctxtrack"><div class="fill" id="ctxFill" style="width:0%"></div></div>
 </div>
 
-<!-- device cards -->
-<div class="grid cards" id="cards"></div>
-
-<!-- charts -->
-<div class="grid charts">
+<!-- device cards + charts share one 4-per-row grid -->
+<div class="grid cards" id="deck">
+  <!-- #cards is display:contents so the JS-rendered device cards become grid items of #deck -->
+  <div id="cards" class="contents"></div>
+  <div class="panel">
+    <div class="chart-head">
+      <div class="lbl">CPU utilization</div>
+      <div class="r" id="cpuNow">—</div>
+    </div>
+    <div class="cwrap"><canvas id="cCpu"></canvas><div class="tip" id="tipCpu"></div></div>
+  </div>
   <div class="panel">
     <div class="chart-head">
       <div class="lbl">GPU utilization</div>
@@ -311,6 +319,7 @@ const S = {
   sys: null,
   utilHist: {},           // id -> [util,...]
   utilT: [],              // timestamps (ms) aligned to utilHist
+  cpuHist: [],            // avg CPU util % history (aligned to HIST cadence)
   decHist: [],            // [{t, tps}]
   logs: [],               // {src, lvl, ts, text}
   logSrc: "all",
@@ -327,6 +336,7 @@ const fmt1 = n => n==null?"—":(Math.round(n*10)/10).toLocaleString("en-US",{mi
 function shortTokens(n){ if(n==null)return "—"; if(n<1000)return ""+n; if(n<1e6)return (n/1e3).toFixed(n<1e4?1:0)+"k"; return (n/1e6).toFixed(2)+"M"; }
 function kTok(n){ if(n==null)return "—"; return n>=1024 ? (n/1024).toFixed(n>=10240?0:1)+"K" : Math.round(n)+""; }  // context-window scale (÷1024)
 function loadColor(pct,warn,crit){ return pct>=crit?cssv("--crit"):pct>=warn?cssv("--warn"):cssv("--good"); }
+function cpuAvgOf(s){ const c=(s&&s.cpu_util_per_core)||[]; return c.length? c.reduce((a,b)=>a+b,0)/c.length : 0; }
 
 /* ---------- stat tiles ---------- */
 function renderTiles(){
@@ -415,7 +425,7 @@ function renderCards(){
   if(S.sys){
     const s=S.sys;
     const cores=s.cpu_util_per_core||[];
-    const cpuAvg=cores.length? cores.reduce((a,b)=>a+b,0)/cores.length:0;
+    const cpuAvg=cpuAvgOf(s);
     const ramPct=s.mem_total_mb? s.mem_used_mb/s.mem_total_mb*100:0;
     parts.push(`<div class="panel card">
       <div class="chead"><div><div class="cname">System <span>· i7-6700</span></div>
@@ -447,6 +457,33 @@ function axes(ctx,w,h,ymax,yticks){
     ctx.globalAlpha=.5; ctx.beginPath(); ctx.moveTo(PAD.l,y); ctx.lineTo(w-PAD.r,y); ctx.stroke(); ctx.globalAlpha=1;
     ctx.textAlign="right"; ctx.fillText(Math.round(val), PAD.l-6, y);
   }
+}
+function drawCpu(){
+  const cv=$("cCpu"); const {ctx,w,h}=setupCanvas(cv);
+  ctx.clearRect(0,0,w,h);
+  const data=S.cpuHist; const N=data.length;
+  axes(ctx,w,h,100,4);
+  $("cpuNow").textContent = N ? Math.round(data[N-1])+"%" : "—";
+  if(N<1){ ctx.fillStyle=cssv("--muted-2"); ctx.textAlign="center"; ctx.fillText("collecting…",w/2,h/2); return; }
+  const x=i=>PAD.l+(w-PAD.l-PAD.r)*(N<2?1:(i/(HIST-1)));
+  const y=v=>PAD.t+(h-PAD.t-PAD.b)*(1-clamp(v,0,100)/100);
+  const off=HIST-N;
+  const col=cssv("--cpu");
+  // area fill
+  const grad=ctx.createLinearGradient(0,PAD.t,0,h-PAD.b);
+  grad.addColorStop(0,"rgba(155,140,255,.26)"); grad.addColorStop(1,"rgba(155,140,255,0)");
+  ctx.beginPath();
+  data.forEach((v,i)=>{const px=x(off+i),py=y(v); i?ctx.lineTo(px,py):ctx.moveTo(px,py);});
+  const lastX=x(off+N-1);
+  ctx.lineTo(lastX,h-PAD.b); ctx.lineTo(x(off),h-PAD.b); ctx.closePath();
+  ctx.fillStyle=grad; ctx.fill();
+  // line
+  ctx.beginPath();
+  data.forEach((v,i)=>{const px=x(off+i),py=y(v); i?ctx.lineTo(px,py):ctx.moveTo(px,py);});
+  ctx.strokeStyle=col; ctx.lineWidth=2; ctx.lineJoin="round"; ctx.stroke();
+  // last marker
+  ctx.fillStyle=col; ctx.beginPath(); ctx.arc(lastX,y(data[N-1]),3,0,7); ctx.fill();
+  drawCrosshair(cv,ctx,w,h,off,x,y,"tipCpu",(i)=>{const v=data[i-off]; return v!=null?[{label:"CPU",color:col,val:Math.round(v)+"%"}]:[];});
 }
 function drawUtil(){
   const cv=$("cUtil"); const {ctx,w,h}=setupCanvas(cv);
@@ -522,6 +559,8 @@ function bindHover(cv, drawFn, idxFromX){
   });
   cv.addEventListener("mouseleave",()=>{ cv._hi=null; drawFn(); });
 }
+function idxCpu(mx,w){ const N=S.cpuHist.length; if(N<1)return null; const off=HIST-N;
+  const rel=(mx-PAD.l)/(w-PAD.l-PAD.r); const i=Math.round(rel*(HIST-1)); return clamp(i,off,HIST-1); }
 function idxUtil(mx,w){ const N=S.utilT.length; if(N<1)return null; const off=HIST-N;
   const rel=(mx-PAD.l)/(w-PAD.l-PAD.r); const i=Math.round(rel*(HIST-1)); return clamp(i,off,HIST-1); }
 function idxDec(mx,w){ const N=S.decHist.length; if(N<1)return null; const off=DEC_HIST-N;
@@ -531,7 +570,7 @@ function renderLegend(){
   $("gpuLegend").innerHTML=S.gpuOrder.map((id,i)=>
     `<span class="li"><span class="sw" style="background:${GPU_COLORS[i%GPU_COLORS.length]}"></span>GPU ${id}</span>`).join("");
 }
-function redrawCharts(){ renderLegend(); drawUtil(); drawDecode(); }
+function redrawCharts(){ renderLegend(); drawCpu(); drawUtil(); drawDecode(); }
 
 /* ---------- perf polling ---------- */
 async function pollPerf(){
@@ -554,6 +593,8 @@ async function pollPerf(){
       const times=[...byTs.keys()].slice(-HIST);
       S.utilT=times.map(t=>Date.parse(t)||0);
       S.gpuOrder.forEach(id=>{ S.utilHist[id]=times.map(t=>byTs.get(t)[id]??0); });
+      // backfill CPU util history from the sys ring
+      S.cpuHist=(d.sys_stats||[]).slice(-HIST).map(cpuAvgOf);
     }else{
       // push a fresh util point
       const now=Date.now();
@@ -563,6 +604,7 @@ async function pollPerf(){
         if(S.utilHist[id].length>HIST) S.utilHist[id].shift();
       });
       S.utilT.push(now); if(S.utilT.length>HIST) S.utilT.shift();
+      if(S.sys){ S.cpuHist.push(cpuAvgOf(S.sys)); if(S.cpuHist.length>HIST) S.cpuHist.shift(); }
     }
     renderCards(); renderTiles(); redrawCharts();
     resyncRunning();   // self-heal model detection even if an SSE modelStatus event was missed
@@ -857,6 +899,7 @@ $("logscroll").addEventListener("scroll",()=>{
   if(atBottom!==S.autoscroll) setFollow(atBottom);
 });
 
+bindHover($("cCpu"), drawCpu, idxCpu);
 bindHover($("cUtil"), drawUtil, idxUtil);
 bindHover($("cDec"), drawDecode, idxDec);
 window.addEventListener("resize",()=>{ clearTimeout(window._rz); window._rz=setTimeout(redrawCharts,150); });
